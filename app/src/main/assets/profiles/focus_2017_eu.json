@@ -1,0 +1,77 @@
+{
+  "id": "focus_2017_eu",
+  "name": "Ford Focus (Mk3 EU) 2017",
+  "years": "2015-2018",
+  "notes": "Seed addresses for Focus Mk3 facelift EU. BCM/IPC typically on MS-CAN (needs OBDLink MX+).",
+  "modules": [
+    {
+      "id": "PCM",
+      "name": "Powertrain Control Module",
+      "tx_id": 2016,
+      "bus": "hs",
+      "dids": [
+        { "did": 61840, "label": "VIN" },
+        { "did": 61832, "label": "Software number" },
+        { "did": 61836, "label": "ECU serial number" }
+      ]
+    },
+    {
+      "id": "ABS",
+      "name": "Anti-lock Braking System",
+      "tx_id": 1888,
+      "bus": "hs",
+      "dids": [{ "did": 61832, "label": "Software number" }]
+    },
+    {
+      "id": "BCM",
+      "name": "Body Control Module",
+      "tx_id": 1830,
+      "bus": "ms",
+      "dids": [
+        { "did": 61832, "label": "Software number" },
+        { "did": 56832, "label": "As-Built DE00", "as_built": true },
+        { "did": 56833, "label": "As-Built DE01", "as_built": true },
+        { "did": 56834, "label": "As-Built DE02", "as_built": true },
+        { "did": 56835, "label": "As-Built DE03", "as_built": true }
+      ]
+    },
+    {
+      "id": "IPC",
+      "name": "Instrument Panel Cluster",
+      "tx_id": 1824,
+      "bus": "ms",
+      "dids": [
+        { "did": 61832, "label": "Software number" },
+        { "did": 56832, "label": "As-Built DE00", "as_built": true }
+      ]
+    },
+    {
+      "id": "RCM",
+      "name": "Restraints Control Module",
+      "tx_id": 1847,
+      "bus": "ms",
+      "dids": [{ "did": 61832, "label": "Software number" }]
+    },
+    {
+      "id": "PAM",
+      "name": "Parking Aid Module",
+      "tx_id": 1846,
+      "bus": "ms",
+      "dids": [{ "did": 61832, "label": "Software number" }]
+    },
+    {
+      "id": "ACM",
+      "name": "Audio Control Module",
+      "tx_id": 1831,
+      "bus": "ms",
+      "dids": [{ "did": 61832, "label": "Software number" }]
+    },
+    {
+      "id": "APIM",
+      "name": "SYNC (APIM)",
+      "tx_id": 2000,
+      "bus": "ms",
+      "dids": [{ "did": 61832, "label": "Software number" }]
+    }
+  ]
+}
