@@ -1,0 +1,562 @@
+{
+  "P0001": {
+    "name": "Fuel Volume Regulator Control Circuit",
+    "description": "Fuel Volume Regulator Control Circuit / Open"
+  },
+  "P0002": {
+    "name": "Fuel Volume Regulator Control Range/Performance",
+    "description": "Fuel Volume Regulator Control Circuit Range/Performance"
+  },
+  "P0010": {
+    "name": "A Camshaft Position Actuator Circuit",
+    "description": "A Camshaft Position Actuator Circuit (Bank 1)"
+  },
+  "P0011": {
+    "name": "A Camshaft Position Timing Over-Advanced",
+    "description": "A Camshaft Position Timing Over-Advanced or System Performance (Bank 1)"
+  },
+  "P0012": {
+    "name": "A Camshaft Position Timing Over-Retarded",
+    "description": "A Camshaft Position Timing Over-Retarded (Bank 1)"
+  },
+  "P0016": {
+    "name": "Crankshaft-Camshaft Correlation Bank 1 Sensor A",
+    "description": "Crankshaft Position - Camshaft Position Correlation (Bank 1 Sensor A)"
+  },
+  "P0017": {
+    "name": "Crankshaft-Camshaft Correlation Bank 1 Sensor B",
+    "description": "Crankshaft Position - Camshaft Position Correlation (Bank 1 Sensor B)"
+  },
+  "P0030": {
+    "name": "HO2S Heater Control Circuit Bank 1 Sensor 1",
+    "description": "HO2S Heater Control Circuit (Bank 1 Sensor 1)"
+  },
+  "P0031": {
+    "name": "HO2S Heater Control Circuit Low B1S1",
+    "description": "HO2S Heater Control Circuit Low (Bank 1 Sensor 1)"
+  },
+  "P0032": {
+    "name": "HO2S Heater Control Circuit High B1S1",
+    "description": "HO2S Heater Control Circuit High (Bank 1 Sensor 1)"
+  },
+  "P0036": {
+    "name": "HO2S Heater Control Circuit Bank 1 Sensor 2",
+    "description": "HO2S Heater Control Circuit (Bank 1 Sensor 2)"
+  },
+  "P0100": {
+    "name": "MAF or VAF Circuit",
+    "description": "Mass or Volume Air Flow Circuit Malfunction"
+  },
+  "P0101": {
+    "name": "MAF Circuit Range/Performance",
+    "description": "Mass or Volume Air Flow Circuit Range/Performance Problem"
+  },
+  "P0102": {
+    "name": "MAF Circuit Low Input",
+    "description": "Mass or Volume Air Flow Circuit Low Input"
+  },
+  "P0103": {
+    "name": "MAF Circuit High Input",
+    "description": "Mass or Volume Air Flow Circuit High Input"
+  },
+  "P0105": {
+    "name": "MAP/BARO Circuit",
+    "description": "Manifold Absolute Pressure/Barometric Pressure Circuit Malfunction"
+  },
+  "P0106": {
+    "name": "MAP/BARO Circuit Range/Performance",
+    "description": "Manifold Absolute Pressure/Barometric Pressure Circuit Range/Performance Problem"
+  },
+  "P0107": {
+    "name": "MAP/BARO Circuit Low Input",
+    "description": "Manifold Absolute Pressure/Barometric Pressure Circuit Low Input"
+  },
+  "P0108": {
+    "name": "MAP/BARO Circuit High Input",
+    "description": "Manifold Absolute Pressure/Barometric Pressure Circuit High Input"
+  },
+  "P0110": {
+    "name": "IAT Sensor Circuit",
+    "description": "Intake Air Temperature Sensor Circuit Malfunction"
+  },
+  "P0111": {
+    "name": "IAT Sensor Circuit Range/Performance",
+    "description": "Intake Air Temperature Sensor Circuit Range/Performance Problem"
+  },
+  "P0112": {
+    "name": "IAT Sensor Circuit Low Input",
+    "description": "Intake Air Temperature Sensor Circuit Low Input"
+  },
+  "P0113": {
+    "name": "IAT Sensor Circuit High Input",
+    "description": "Intake Air Temperature Sensor Circuit High Input"
+  },
+  "P0115": {
+    "name": "ECT Sensor Circuit",
+    "description": "Engine Coolant Temperature Sensor Circuit Malfunction"
+  },
+  "P0116": {
+    "name": "ECT Sensor Circuit Range/Performance",
+    "description": "Engine Coolant Temperature Sensor Circuit Range/Performance Problem"
+  },
+  "P0117": {
+    "name": "ECT Sensor Circuit Low Input",
+    "description": "Engine Coolant Temperature Sensor Circuit Low Input"
+  },
+  "P0118": {
+    "name": "ECT Sensor Circuit High Input",
+    "description": "Engine Coolant Temperature Sensor Circuit High Input"
+  },
+  "P0120": {
+    "name": "TPS/Pedal Position Sensor A Circuit",
+    "description": "Throttle/Pedal Position Sensor/Switch A Circuit Malfunction"
+  },
+  "P0121": {
+    "name": "TPS A Circuit Range/Performance",
+    "description": "Throttle/Pedal Position Sensor/Switch A Circuit Range/Performance Problem"
+  },
+  "P0122": {
+    "name": "TPS A Circuit Low Input",
+    "description": "Throttle/Pedal Position Sensor/Switch A Circuit Low Input"
+  },
+  "P0123": {
+    "name": "TPS A Circuit High Input",
+    "description": "Throttle/Pedal Position Sensor/Switch A Circuit High Input"
+  },
+  "P0125": {
+    "name": "Insufficient Coolant Temp for Closed Loop",
+    "description": "Insufficient Coolant Temperature for Closed Loop Fuel Control"
+  },
+  "P0128": {
+    "name": "Coolant Thermostat",
+    "description": "Coolant Thermostat (Coolant Temperature Below Thermostat Regulating Temperature)"
+  },
+  "P0130": {
+    "name": "O2 Sensor Circuit Bank 1 Sensor 1",
+    "description": "O2 Sensor Circuit Malfunction (Bank 1 Sensor 1)"
+  },
+  "P0131": {
+    "name": "O2 Sensor Circuit Low Voltage B1S1",
+    "description": "O2 Sensor Circuit Low Voltage (Bank 1 Sensor 1)"
+  },
+  "P0132": {
+    "name": "O2 Sensor Circuit High Voltage B1S1",
+    "description": "O2 Sensor Circuit High Voltage (Bank 1 Sensor 1)"
+  },
+  "P0133": {
+    "name": "O2 Sensor Circuit Slow Response B1S1",
+    "description": "O2 Sensor Circuit Slow Response (Bank 1 Sensor 1)"
+  },
+  "P0134": {
+    "name": "O2 Sensor Circuit No Activity B1S1",
+    "description": "O2 Sensor Circuit No Activity Detected (Bank 1 Sensor 1)"
+  },
+  "P0135": {
+    "name": "O2 Sensor Heater Circuit B1S1",
+    "description": "O2 Sensor Heater Circuit Malfunction (Bank 1 Sensor 1)"
+  },
+  "P0136": {
+    "name": "O2 Sensor Circuit Bank 1 Sensor 2",
+    "description": "O2 Sensor Circuit Malfunction (Bank 1 Sensor 2)"
+  },
+  "P0137": {
+    "name": "O2 Sensor Circuit Low Voltage B1S2",
+    "description": "O2 Sensor Circuit Low Voltage (Bank 1 Sensor 2)"
+  },
+  "P0138": {
+    "name": "O2 Sensor Circuit High Voltage B1S2",
+    "description": "O2 Sensor Circuit High Voltage (Bank 1 Sensor 2)"
+  },
+  "P0140": {
+    "name": "O2 Sensor Circuit No Activity B1S2",
+    "description": "O2 Sensor Circuit No Activity Detected (Bank 1 Sensor 2)"
+  },
+  "P0141": {
+    "name": "O2 Sensor Heater Circuit B1S2",
+    "description": "O2 Sensor Heater Circuit Malfunction (Bank 1 Sensor 2)"
+  },
+  "P0170": {
+    "name": "Fuel Trim Malfunction Bank 1",
+    "description": "Fuel Trim Malfunction (Bank 1)"
+  },
+  "P0171": {
+    "name": "System Too Lean Bank 1",
+    "description": "System Too Lean (Bank 1)"
+  },
+  "P0172": {
+    "name": "System Too Rich Bank 1",
+    "description": "System Too Rich (Bank 1)"
+  },
+  "P0174": {
+    "name": "System Too Lean Bank 2",
+    "description": "System Too Lean (Bank 2)"
+  },
+  "P0175": {
+    "name": "System Too Rich Bank 2",
+    "description": "System Too Rich (Bank 2)"
+  },
+  "P0200": {
+    "name": "Injector Circuit",
+    "description": "Injector Circuit Malfunction"
+  },
+  "P0201": {
+    "name": "Injector Circuit Cylinder 1",
+    "description": "Injector Circuit Malfunction - Cylinder 1"
+  },
+  "P0202": {
+    "name": "Injector Circuit Cylinder 2",
+    "description": "Injector Circuit Malfunction - Cylinder 2"
+  },
+  "P0203": {
+    "name": "Injector Circuit Cylinder 3",
+    "description": "Injector Circuit Malfunction - Cylinder 3"
+  },
+  "P0204": {
+    "name": "Injector Circuit Cylinder 4",
+    "description": "Injector Circuit Malfunction - Cylinder 4"
+  },
+  "P0217": {
+    "name": "Engine Overtemperature",
+    "description": "Engine Overtemperature Condition"
+  },
+  "P0218": {
+    "name": "Transmission Overtemperature",
+    "description": "Transmission Overtemperature Condition"
+  },
+  "P0220": {
+    "name": "TPS/Pedal Position Sensor B Circuit",
+    "description": "Throttle/Pedal Position Sensor/Switch B Circuit Malfunction"
+  },
+  "P0221": {
+    "name": "TPS B Circuit Range/Performance",
+    "description": "Throttle/Pedal Position Sensor/Switch B Circuit Range/Performance Problem"
+  },
+  "P0222": {
+    "name": "TPS B Circuit Low Input",
+    "description": "Throttle/Pedal Position Sensor/Switch B Circuit Low Input"
+  },
+  "P0223": {
+    "name": "TPS B Circuit High Input",
+    "description": "Throttle/Pedal Position Sensor/Switch B Circuit High Input"
+  },
+  "P0300": {
+    "name": "Random/Multiple Cylinder Misfire",
+    "description": "Random/Multiple Cylinder Misfire Detected"
+  },
+  "P0301": {
+    "name": "Cylinder 1 Misfire",
+    "description": "Cylinder 1 Misfire Detected"
+  },
+  "P0302": {
+    "name": "Cylinder 2 Misfire",
+    "description": "Cylinder 2 Misfire Detected"
+  },
+  "P0303": {
+    "name": "Cylinder 3 Misfire",
+    "description": "Cylinder 3 Misfire Detected"
+  },
+  "P0304": {
+    "name": "Cylinder 4 Misfire",
+    "description": "Cylinder 4 Misfire Detected"
+  },
+  "P0305": {
+    "name": "Cylinder 5 Misfire",
+    "description": "Cylinder 5 Misfire Detected"
+  },
+  "P0306": {
+    "name": "Cylinder 6 Misfire",
+    "description": "Cylinder 6 Misfire Detected"
+  },
+  "P0325": {
+    "name": "Knock Sensor 1 Circuit",
+    "description": "Knock Sensor 1 Circuit Malfunction (Bank 1 or Single Sensor)"
+  },
+  "P0330": {
+    "name": "Knock Sensor 2 Circuit",
+    "description": "Knock Sensor 2 Circuit Malfunction (Bank 2)"
+  },
+  "P0335": {
+    "name": "Crankshaft Position Sensor A Circuit",
+    "description": "Crankshaft Position Sensor A Circuit Malfunction"
+  },
+  "P0336": {
+    "name": "CKP Sensor A Circuit Range/Performance",
+    "description": "Crankshaft Position Sensor A Circuit Range/Performance"
+  },
+  "P0340": {
+    "name": "Camshaft Position Sensor A Circuit",
+    "description": "Camshaft Position Sensor A Circuit Malfunction (Bank 1 or Single Sensor)"
+  },
+  "P0341": {
+    "name": "CMP Sensor A Circuit Range/Performance",
+    "description": "Camshaft Position Sensor A Circuit Range/Performance (Bank 1)"
+  },
+  "P0400": {
+    "name": "EGR Flow",
+    "description": "Exhaust Gas Recirculation Flow Malfunction"
+  },
+  "P0401": {
+    "name": "EGR Flow Insufficient",
+    "description": "Exhaust Gas Recirculation Flow Insufficient Detected"
+  },
+  "P0402": {
+    "name": "EGR Flow Excessive",
+    "description": "Exhaust Gas Recirculation Flow Excessive Detected"
+  },
+  "P0420": {
+    "name": "Catalyst System Efficiency Below Threshold Bank 1",
+    "description": "Catalyst System Efficiency Below Threshold (Bank 1)"
+  },
+  "P0430": {
+    "name": "Catalyst System Efficiency Below Threshold Bank 2",
+    "description": "Catalyst System Efficiency Below Threshold (Bank 2)"
+  },
+  "P0440": {
+    "name": "Evaporative Emission Control System",
+    "description": "Evaporative Emission Control System Malfunction"
+  },
+  "P0441": {
+    "name": "EVAP Incorrect Purge Flow",
+    "description": "Evaporative Emission Control System Incorrect Purge Flow"
+  },
+  "P0442": {
+    "name": "EVAP Leak Detected (Small Leak)",
+    "description": "Evaporative Emission Control System Leak Detected (Small Leak)"
+  },
+  "P0443": {
+    "name": "EVAP Purge Control Valve Circuit",
+    "description": "Evaporative Emission Control System Purge Control Valve Circuit Malfunction"
+  },
+  "P0446": {
+    "name": "EVAP Vent Control Circuit",
+    "description": "Evaporative Emission Control System Vent Control Circuit Malfunction"
+  },
+  "P0450": {
+    "name": "EVAP Pressure Sensor",
+    "description": "Evaporative Emission Control System Pressure Sensor Malfunction"
+  },
+  "P0455": {
+    "name": "EVAP Leak Detected (Large Leak)",
+    "description": "Evaporative Emission Control System Leak Detected (Gross Leak / No Flow)"
+  },
+  "P0456": {
+    "name": "EVAP Leak Detected (Very Small Leak)",
+    "description": "Evaporative Emission Control System Leak Detected (Very Small Leak)"
+  },
+  "P0460": {
+    "name": "Fuel Level Sensor Circuit",
+    "description": "Fuel Level Sensor Circuit Malfunction"
+  },
+  "P0461": {
+    "name": "Fuel Level Sensor Circuit Range/Performance",
+    "description": "Fuel Level Sensor Circuit Range/Performance"
+  },
+  "P0462": {
+    "name": "Fuel Level Sensor Circuit Low Input",
+    "description": "Fuel Level Sensor Circuit Low Input"
+  },
+  "P0463": {
+    "name": "Fuel Level Sensor Circuit High Input",
+    "description": "Fuel Level Sensor Circuit High Input"
+  },
+  "P0480": {
+    "name": "Cooling Fan 1 Control Circuit",
+    "description": "Cooling Fan 1 Control Circuit Malfunction"
+  },
+  "P0500": {
+    "name": "Vehicle Speed Sensor",
+    "description": "Vehicle Speed Sensor Malfunction"
+  },
+  "P0505": {
+    "name": "Idle Control System",
+    "description": "Idle Control System Malfunction"
+  },
+  "P0506": {
+    "name": "Idle Control System RPM Lower Than Expected",
+    "description": "Idle Control System RPM Lower Than Expected"
+  },
+  "P0507": {
+    "name": "Idle Control System RPM Higher Than Expected",
+    "description": "Idle Control System RPM Higher Than Expected"
+  },
+  "P0560": {
+    "name": "System Voltage",
+    "description": "System Voltage Malfunction"
+  },
+  "P0562": {
+    "name": "System Voltage Low",
+    "description": "System Voltage Low"
+  },
+  "P0563": {
+    "name": "System Voltage High",
+    "description": "System Voltage High"
+  },
+  "P0600": {
+    "name": "Serial Communication Link",
+    "description": "Serial Communication Link Malfunction"
+  },
+  "P0601": {
+    "name": "Internal Control Module Memory Check Sum Error",
+    "description": "Internal Control Module Memory Check Sum Error"
+  },
+  "P0602": {
+    "name": "Control Module Programming Error",
+    "description": "Control Module Programming Error"
+  },
+  "P0603": {
+    "name": "Internal Control Module KAM Error",
+    "description": "Internal Control Module Keep Alive Memory (KAM) Error"
+  },
+  "P0604": {
+    "name": "Internal Control Module RAM Error",
+    "description": "Internal Control Module Random Access Memory (RAM) Error"
+  },
+  "P0605": {
+    "name": "Internal Control Module ROM Error",
+    "description": "Internal Control Module Read Only Memory (ROM) Error"
+  },
+  "P0606": {
+    "name": "ECM/PCM Processor Fault",
+    "description": "ECM/PCM Processor Fault"
+  },
+  "P0615": {
+    "name": "Starter Relay Circuit",
+    "description": "Starter Relay Circuit"
+  },
+  "P0620": {
+    "name": "Generator Control Circuit",
+    "description": "Generator Control Circuit Malfunction"
+  },
+  "P0625": {
+    "name": "Generator Field Terminal Circuit Low",
+    "description": "Generator Field/F Terminal Circuit Low"
+  },
+  "P0626": {
+    "name": "Generator Field Terminal Circuit High",
+    "description": "Generator Field/F Terminal Circuit High"
+  },
+  "P0630": {
+    "name": "VIN Not Programmed or Mismatch",
+    "description": "VIN Not Programmed or Incompatible - ECM/PCM"
+  },
+  "P0641": {
+    "name": "Sensor Reference Voltage A Circuit Open",
+    "description": "Sensor Reference Voltage A Circuit / Open"
+  },
+  "P0651": {
+    "name": "Sensor Reference Voltage B Circuit Open",
+    "description": "Sensor Reference Voltage B Circuit / Open"
+  },
+  "P0685": {
+    "name": "ECM/PCM Power Relay Control Circuit Open",
+    "description": "ECM/PCM Power Relay Control Circuit / Open"
+  },
+  "P0700": {
+    "name": "Transmission Control System",
+    "description": "Transmission Control System Malfunction"
+  },
+  "P0705": {
+    "name": "Transmission Range Sensor Circuit",
+    "description": "Transmission Range Sensor Circuit Malfunction (PRNDL Input)"
+  },
+  "P0715": {
+    "name": "Input/Turbine Speed Sensor Circuit",
+    "description": "Input/Turbine Speed Sensor Circuit Malfunction"
+  },
+  "P0720": {
+    "name": "Output Speed Sensor Circuit",
+    "description": "Output Speed Sensor Circuit Malfunction"
+  },
+  "P0730": {
+    "name": "Incorrect Gear Ratio",
+    "description": "Incorrect Gear Ratio"
+  },
+  "P0740": {
+    "name": "Torque Converter Clutch Circuit",
+    "description": "Torque Converter Clutch Circuit Malfunction"
+  },
+  "P0741": {
+    "name": "Torque Converter Clutch Circuit Performance",
+    "description": "Torque Converter Clutch Circuit Performance or Stuck Off"
+  },
+  "P0750": {
+    "name": "Shift Solenoid A",
+    "description": "Shift Solenoid A Malfunction"
+  },
+  "P0755": {
+    "name": "Shift Solenoid B",
+    "description": "Shift Solenoid B Malfunction"
+  },
+  "P1000": {
+    "name": "OBD Systems Readiness Test Not Complete",
+    "description": "OBD Systems Readiness Test Not Complete (Ford)"
+  },
+  "P1131": {
+    "name": "Lack of HO2S11 Switches - Sensor Indicates Lean",
+    "description": "Lack of HO2S11 Switches - Sensor Indicates Lean (Ford)"
+  },
+  "P1132": {
+    "name": "Lack of HO2S11 Switches - Sensor Indicates Rich",
+    "description": "Lack of HO2S11 Switches - Sensor Indicates Rich (Ford)"
+  },
+  "P1151": {
+    "name": "Lack of HO2S21 Switches - Sensor Indicates Lean",
+    "description": "Lack of HO2S21 Switches - Sensor Indicates Lean (Ford)"
+  },
+  "P1152": {
+    "name": "Lack of HO2S21 Switches - Sensor Indicates Rich",
+    "description": "Lack of HO2S21 Switches - Sensor Indicates Rich (Ford)"
+  },
+  "P2195": {
+    "name": "O2 Sensor Signal Biased/Stuck Lean B1S1",
+    "description": "O2 Sensor Signal Biased/Stuck Lean (Bank 1 Sensor 1)"
+  },
+  "P2196": {
+    "name": "O2 Sensor Signal Biased/Stuck Rich B1S1",
+    "description": "O2 Sensor Signal Biased/Stuck Rich (Bank 1 Sensor 1)"
+  },
+  "P2290": {
+    "name": "Injector Control Pressure Too Low",
+    "description": "Injector Control Pressure Too Low"
+  },
+  "P2291": {
+    "name": "Injector Control Pressure Too Low - Engine Cranking",
+    "description": "Injector Control Pressure Too Low - Engine Cranking"
+  },
+  "C0035": {
+    "name": "Left Front Wheel Speed Sensor Circuit",
+    "description": "Left Front Wheel Speed Sensor Circuit"
+  },
+  "C0040": {
+    "name": "Right Front Wheel Speed Sensor Circuit",
+    "description": "Right Front Wheel Speed Sensor Circuit"
+  },
+  "C0045": {
+    "name": "Left Rear Wheel Speed Sensor Circuit",
+    "description": "Left Rear Wheel Speed Sensor Circuit"
+  },
+  "C0050": {
+    "name": "Right Rear Wheel Speed Sensor Circuit",
+    "description": "Right Rear Wheel Speed Sensor Circuit"
+  },
+  "U0100": {
+    "name": "Lost Communication With ECM/PCM",
+    "description": "Lost Communication With ECM/PCM A"
+  },
+  "U0101": {
+    "name": "Lost Communication With TCM",
+    "description": "Lost Communication With TCM"
+  },
+  "U0121": {
+    "name": "Lost Communication With ABS Control Module",
+    "description": "Lost Communication With Anti-Lock Brake System (ABS) Control Module"
+  },
+  "U0140": {
+    "name": "Lost Communication With Body Control Module",
+    "description": "Lost Communication With Body Control Module"
+  },
+  "U0155": {
+    "name": "Lost Communication With Instrument Panel Cluster",
+    "description": "Lost Communication With Instrument Panel Cluster (IPC) Control Module"
+  }
+}

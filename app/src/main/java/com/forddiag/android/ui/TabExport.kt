@@ -9,11 +9,13 @@ import androidx.core.content.FileProvider
 import com.forddiag.android.core.CanFrame
 import com.forddiag.android.core.ConnectionStatus
 import com.forddiag.android.core.DiscoveredEcu
+import com.forddiag.android.core.DtcCatalog
 import com.forddiag.android.core.LiveSample
 import com.forddiag.android.core.LiveSource
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
 import com.forddiag.android.core.PatternCandidate
+import com.forddiag.android.core.formatDtcStatus
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -290,7 +292,7 @@ private fun exportDtcs(groups: List<ModuleDtcGroup>): TabExportPayload {
                 group.error != null -> appendLine(group.error)
                 group.dtcs.isEmpty() -> appendLine("No DTCs")
                 else -> group.dtcs.forEach { d ->
-                    appendLine("${d.code}  status=0x${d.status.toString(16)}")
+                    appendLine(DtcCatalog.formatDisplay(d))
                 }
             }
             appendLine()
@@ -298,7 +300,20 @@ private fun exportDtcs(groups: List<ModuleDtcGroup>): TabExportPayload {
     }.trimEnd()
 
     val csv = buildString {
-        appendLine(csvRow("moduleId", "moduleName", "txId", "bus", "code", "status"))
+        appendLine(
+            csvRow(
+                "moduleId",
+                "moduleName",
+                "txId",
+                "bus",
+                "code",
+                "name",
+                "status",
+                "statusFlags",
+                "description",
+                "display",
+            ),
+        )
         groups.forEach { group ->
             when {
                 group.error != null -> appendLine(
@@ -308,7 +323,11 @@ private fun exportDtcs(groups: List<ModuleDtcGroup>): TabExportPayload {
                         "0x%03X".format(group.txId),
                         group.bus.name,
                         "ERROR",
+                        "",
                         group.error,
+                        "",
+                        "",
+                        "",
                     ),
                 )
                 group.dtcs.isEmpty() -> appendLine(
@@ -318,10 +337,15 @@ private fun exportDtcs(groups: List<ModuleDtcGroup>): TabExportPayload {
                         "0x%03X".format(group.txId),
                         group.bus.name,
                         "",
+                        "",
                         "No DTCs",
+                        "",
+                        "",
+                        "",
                     ),
                 )
                 else -> group.dtcs.forEach { d ->
+                    val info = DtcCatalog.lookup(d.code)
                     appendLine(
                         csvRow(
                             group.moduleId,
@@ -329,7 +353,11 @@ private fun exportDtcs(groups: List<ModuleDtcGroup>): TabExportPayload {
                             "0x%03X".format(group.txId),
                             group.bus.name,
                             d.code,
+                            info?.name ?: "Unknown",
                             "0x${d.status.toString(16)}",
+                            formatDtcStatus(d.status),
+                            info?.description.orEmpty(),
+                            DtcCatalog.formatDisplay(d),
                         ),
                     )
                 }

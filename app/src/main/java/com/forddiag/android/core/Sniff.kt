@@ -17,6 +17,24 @@ data class PatternCandidate(
     val sampleValues: List<String>,
 )
 
+/**
+ * One timed stage of a guided press-capture sequence.
+ * [expectedPresses] is 0 for the idle baseline stage.
+ */
+data class CaptureStage(
+    val expectedPresses: Int,
+    val startMs: Long,
+    val endMs: Long,
+)
+
+/** UI snapshot of an in-progress guided press sequence. */
+data class PressSequenceUi(
+    val stageIndex: Int,
+    val stageLabel: String,
+    val progress: Float,
+    val totalStages: Int = 4,
+)
+
 /** Parse one ELM monitor line into a frame (headers on). */
 fun parseMonitorLine(line: String, tsMs: Long): CanFrame? {
     val trimmed = line.trim().trimEnd('>')
@@ -68,6 +86,9 @@ fun parseMonitorBuffer(buf: String, baseTsMs: Long): List<CanFrame> {
     }
     return frames
 }
+
+private const val BASELINE_NOISE_CHANGES = 3
+private const val SEQUENCE_SCORE_THRESHOLD = 0.5
 
 /** Score IDs/bytes whose changes cluster inside press windows more than outside. */
 fun correlatePressPattern(
@@ -134,6 +155,122 @@ fun correlatePressPattern(
     }
 
     return candidates.sortedByDescending { it.changeScore }.take(40)
+}
+
+/**
+ * Score IDs/bytes whose change counts across guided stages match expected press counts.
+ * Stage 0 (expectedPresses == 0) is the idle baseline used to reject periodic noise.
+ */
+fun correlatePressSequence(
+    frames: List<CanFrame>,
+    stages: List<CaptureStage>,
+): List<PatternCandidate> {
+    if (frames.isEmpty() || stages.size < 2) return emptyList()
+
+    val baseline = stages.firstOrNull { it.expectedPresses == 0 } ?: return emptyList()
+    val pressStages = stages.filter { it.expectedPresses > 0 }.sortedBy { it.expectedPresses }
+    if (pressStages.isEmpty()) return emptyList()
+
+    val byId = frames.groupBy { it.id }
+    val candidates = mutableListOf<PatternCandidate>()
+
+    for ((canId, list) in byId) {
+        if (list.size < 2) continue
+        val maxLen = list.maxOf { it.data.size }
+        for (byteI in 0 until maxLen) {
+            val stageCounts = IntArray(stages.size)
+            val stageSamples = List(stages.size) { mutableListOf<String>() }
+            for (w in list.windowed(2)) {
+                val a = w[0].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
+                val b = w[1].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
+                if (a == b) continue
+                val ts = w[1].tsMs
+                val stageIdx = stages.indexOfFirst { ts in it.startMs..it.endMs }
+                if (stageIdx < 0) continue
+                stageCounts[stageIdx]++
+                if (stageSamples[stageIdx].size < 4) {
+                    stageSamples[stageIdx] += "s${stageIdx}:%02X->%02X".format(a, b)
+                }
+            }
+
+            val baselineIdx = stages.indexOf(baseline)
+            val c0 = stageCounts.getOrElse(baselineIdx) { 0 }
+            if (c0 >= BASELINE_NOISE_CHANGES) continue
+
+            val observed = pressStages.map { stage ->
+                val idx = stages.indexOf(stage)
+                stageCounts.getOrElse(idx) { 0 }.toDouble()
+            }
+            if (observed.all { it == 0.0 }) continue
+
+            var bestScore = 0.0
+            for (k in 1..2) {
+                val expected = pressStages.map { (it.expectedPresses * k).toDouble() }
+                val sim = sequenceSimilarity(observed, expected)
+                val penalty = 1.0 - (c0.toDouble() / BASELINE_NOISE_CHANGES)
+                val score = sim * penalty.coerceAtLeast(0.0)
+                if (score > bestScore) bestScore = score
+            }
+            if (bestScore < SEQUENCE_SCORE_THRESHOLD) continue
+
+            var bestBit: Pair<Int, Double>? = null
+            for (bit in 0 until 8) {
+                val mask = 1 shl bit
+                val bitCounts = IntArray(stages.size)
+                for (w in list.windowed(2)) {
+                    val a = w[0].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
+                    val b = w[1].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
+                    if ((a xor b) and mask == 0) continue
+                    val ts = w[1].tsMs
+                    val stageIdx = stages.indexOfFirst { ts in it.startMs..it.endMs }
+                    if (stageIdx >= 0) bitCounts[stageIdx]++
+                }
+                val bitC0 = bitCounts.getOrElse(baselineIdx) { 0 }
+                if (bitC0 >= BASELINE_NOISE_CHANGES) continue
+                val bitObs = pressStages.map { stage ->
+                    bitCounts.getOrElse(stages.indexOf(stage)) { 0 }.toDouble()
+                }
+                if (bitObs.all { it == 0.0 }) continue
+                var bitBest = 0.0
+                for (k in 1..2) {
+                    val expected = pressStages.map { (it.expectedPresses * k).toDouble() }
+                    val sim = sequenceSimilarity(bitObs, expected)
+                    val penalty = 1.0 - (bitC0.toDouble() / BASELINE_NOISE_CHANGES)
+                    bitBest = maxOf(bitBest, sim * penalty.coerceAtLeast(0.0))
+                }
+                if (bestBit == null || bitBest > bestBit.second) {
+                    bestBit = bit to bitBest
+                }
+            }
+
+            candidates += PatternCandidate(
+                canId = canId,
+                byteIndex = byteI,
+                bitIndex = bestBit?.takeIf { it.second >= SEQUENCE_SCORE_THRESHOLD }?.first,
+                changeScore = bestScore,
+                sampleValues = stageSamples.flatten().take(8),
+            )
+        }
+    }
+
+    return candidates.sortedByDescending { it.changeScore }.take(40)
+}
+
+/** Mean relative similarity of observed change counts to an expected sequence. */
+internal fun sequenceSimilarity(observed: List<Double>, expected: List<Double>): Double {
+    if (observed.size != expected.size || observed.isEmpty()) return 0.0
+    var sum = 0.0
+    for (i in observed.indices) {
+        val exp = expected[i]
+        val obs = observed[i]
+        if (exp <= 0.0) {
+            sum += if (obs == 0.0) 1.0 else 0.0
+            continue
+        }
+        val err = kotlin.math.abs(obs - exp) / exp
+        sum += (1.0 - err).coerceIn(0.0, 1.0)
+    }
+    return sum / observed.size
 }
 
 /** Diff two DID snapshots (did -> hex). */

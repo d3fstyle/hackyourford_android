@@ -33,12 +33,14 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -58,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.forddiag.android.core.CanBus
 import com.forddiag.android.core.CanFrame
 import com.forddiag.android.core.DiscoveredEcu
+import com.forddiag.android.core.DtcCatalog
 import com.forddiag.android.core.LiveSample
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
@@ -153,8 +156,8 @@ fun FordDiagApp(viewModel: FordDiagViewModel) {
                         state = state,
                         onStartSniff = viewModel::startSniff,
                         onStop = viewModel::stopActivity,
-                        onMarkPress = viewModel::markPress,
-                        onAnalyze = viewModel::analyzePattern,
+                        onStartPressSequence = viewModel::startPressSequence,
+                        onCancelPressSequence = viewModel::cancelPressSequence,
                         onDidSweep = viewModel::didSweep,
                         onSnapshot = viewModel::didSnapshot,
                         onDiff = viewModel::diffSnapshots,
@@ -999,7 +1002,7 @@ private fun ModuleCard(
             if (dtcs.isNotEmpty()) {
                 dtcs.forEach { d ->
                     Text(
-                        "${d.code}  status=0x${d.status.toString(16)}",
+                        DtcCatalog.formatDisplay(d),
                         color = TextPrimary,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 12.sp,
@@ -1100,7 +1103,7 @@ private fun DtcGroupCard(group: ModuleDtcGroup, busy: Boolean, onClear: () -> Un
             group.dtcs.isEmpty() -> Text("No DTCs", color = TextMuted, fontSize = 13.sp)
             else -> group.dtcs.forEach { d ->
                 Text(
-                    "${d.code}  status=0x${d.status.toString(16)}",
+                    DtcCatalog.formatDisplay(d),
                     color = TextPrimary,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 13.sp,
@@ -1215,8 +1218,8 @@ private fun DiscoverScreen(
     state: UiState,
     onStartSniff: (CanBus) -> Unit,
     onStop: () -> Unit,
-    onMarkPress: () -> Unit,
-    onAnalyze: () -> Unit,
+    onStartPressSequence: () -> Unit,
+    onCancelPressSequence: () -> Unit,
     onDidSweep: (String, Int, Int) -> Unit,
     onSnapshot: (String, Int, Int, String) -> Unit,
     onDiff: () -> Unit,
@@ -1231,6 +1234,7 @@ private fun DiscoverScreen(
     var moduleExpanded by remember { mutableStateOf(false) }
     val discoverMode =
         if (mode == "did") DiscoverExportMode.DID else DiscoverExportMode.SNIFF
+    val pressSeq = state.pressSequence
 
     Column(
         modifier = Modifier
@@ -1262,18 +1266,11 @@ private fun DiscoverScreen(
                     OutlinedButton(onClick = onStop) {
                         Text("Stop", maxLines = 1, softWrap = false)
                     }
-                    OutlinedButton(onClick = onMarkPress) {
-                        Text(
-                            if (state.pressMarking) "Stop press" else "Start press",
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
                     OutlinedButton(
-                        onClick = onAnalyze,
-                        enabled = state.pressWindowCount > 0,
+                        onClick = onStartPressSequence,
+                        enabled = pressSeq == null,
                     ) {
-                        Text("Analyze", maxLines = 1, softWrap = false)
+                        Text("Analyze press", maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -1390,6 +1387,34 @@ private fun DiscoverScreen(
                 }
             }
         }
+    }
+
+    pressSeq?.let { seq ->
+        AlertDialog(
+            onDismissRequest = onCancelPressSequence,
+            properties = DialogProperties(
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false,
+            ),
+            title = {
+                Text("Etapa ${seq.stageIndex + 1}/${seq.totalStages}")
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(seq.stageLabel, color = TextPrimary)
+                    LinearProgressIndicator(
+                        progress = { seq.progress },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Accent,
+                        trackColor = Line,
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = onCancelPressSequence) { Text("Cancelar") }
+            },
+        )
     }
 }
 

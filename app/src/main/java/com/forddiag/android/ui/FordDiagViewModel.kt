@@ -13,6 +13,7 @@ import com.forddiag.android.core.ConnectionStatus
 import com.forddiag.android.core.DidDef
 import com.forddiag.android.core.DiscoveredEcu
 import com.forddiag.android.core.DidValue
+import com.forddiag.android.core.DtcCatalog
 import com.forddiag.android.core.EcuDiscoverProgress
 import com.forddiag.android.core.LiveDidPin
 import com.forddiag.android.core.LiveSample
@@ -21,11 +22,13 @@ import com.forddiag.android.core.LiveSource
 import com.forddiag.android.core.ModuleDef
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
+import com.forddiag.android.core.CaptureStage
 import com.forddiag.android.core.PatternCandidate
+import com.forddiag.android.core.PressSequenceUi
 import com.forddiag.android.core.ProfileRepository
 import com.forddiag.android.core.ScannerSession
 import com.forddiag.android.core.VehicleProfile
-import com.forddiag.android.core.correlatePressPattern
+import com.forddiag.android.core.correlatePressSequence
 import com.forddiag.android.core.diffDidSnapshots
 import com.forddiag.android.core.listBondedObdDevices
 import kotlinx.coroutines.Dispatchers
@@ -67,10 +70,8 @@ data class UiState(
     val sniffing: Boolean = false,
     val frames: List<CanFrame> = emptyList(),
     val candidates: List<PatternCandidate> = emptyList(),
-    /** True while a press window is open (Start press pressed, Stop press pending). */
-    val pressMarking: Boolean = false,
-    /** Number of closed press windows available for Analyze. */
-    val pressWindowCount: Int = 0,
+    /** Non-null while a guided press-capture sequence is running. */
+    val pressSequence: PressSequenceUi? = null,
     val sweptDids: List<DidValue> = emptyList(),
     val didDiffs: List<Triple<Int, String, String>> = emptyList(),
     val busy: String? = null,
@@ -90,16 +91,28 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     private val liveSamples = mutableListOf<LiveSample>()
     private var liveStartedAt = 0L
-    private val pressWindows = mutableListOf<Pair<Long, Long>>()
-    private var pressMarkStart: Long? = null
+    private var pressSequenceJob: Job? = null
     private var snapshotBefore: Map<Int, String> = emptyMap()
     private var snapshotAfter: Map<Int, String> = emptyMap()
     private val pinnedDids = mutableListOf<LiveDidPin>()
     private val sniffFrames = mutableListOf<CanFrame>()
 
+    companion object {
+        const val PRESS_STAGE_MS = 5_000L
+        private const val PRESS_TICK_MS = 50L
+
+        private val PRESS_STAGE_DEFS = listOf(
+            0 to "No pulses. Espera…",
+            1 to "Pulsa 1 vez y espera",
+            2 to "Pulsa 2 veces y espera",
+            3 to "Pulsa 3 veces y espera",
+        )
+    }
+
     init {
         refreshDevices()
         loadProfiles()
+        DtcCatalog.ensureLoaded(getApplication())
     }
 
     fun selectTab(tab: AppTab) {
@@ -447,9 +460,8 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun startSniff(bus: CanBus) {
+        cancelPressSequence()
         stopBackgroundJobs()
-        pressWindows.clear()
-        pressMarkStart = null
         sniffJob = viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -457,8 +469,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     error = null,
                     frames = emptyList(),
                     candidates = emptyList(),
-                    pressMarking = false,
-                    pressWindowCount = 0,
+                    pressSequence = null,
                 )
             }
             try {
@@ -497,28 +508,62 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopSniff() {
+        cancelPressSequence()
         sniffJob?.cancel()
         sniffJob = null
     }
 
-    fun markPress() {
-        val now = System.currentTimeMillis()
-        val start = pressMarkStart
-        if (start == null) {
-            pressMarkStart = now
-            _state.update { it.copy(pressMarking = true) }
-        } else {
-            pressWindows += start to now
-            pressMarkStart = null
-            _state.update {
-                it.copy(pressMarking = false, pressWindowCount = pressWindows.size)
+    /** Start the guided 4-stage press capture (baseline + 1/2/3 presses). */
+    fun startPressSequence() {
+        if (!_state.value.sniffing) return
+        if (pressSequenceJob?.isActive == true) return
+        pressSequenceJob = viewModelScope.launch {
+            val stages = mutableListOf<CaptureStage>()
+            val total = PRESS_STAGE_DEFS.size
+            try {
+                for ((index, def) in PRESS_STAGE_DEFS.withIndex()) {
+                    val (expectedPresses, label) = def
+                    val startMs = System.currentTimeMillis()
+                    _state.update {
+                        it.copy(
+                            pressSequence = PressSequenceUi(
+                                stageIndex = index,
+                                stageLabel = label,
+                                progress = 0f,
+                                totalStages = total,
+                            ),
+                            candidates = if (index == 0) emptyList() else it.candidates,
+                        )
+                    }
+                    var elapsed = 0L
+                    while (elapsed < PRESS_STAGE_MS && isActive) {
+                        delay(PRESS_TICK_MS)
+                        elapsed = System.currentTimeMillis() - startMs
+                        val progress = (elapsed.toFloat() / PRESS_STAGE_MS).coerceIn(0f, 1f)
+                        _state.update {
+                            it.copy(
+                                pressSequence = it.pressSequence?.copy(progress = progress),
+                            )
+                        }
+                    }
+                    if (!isActive) return@launch
+                    val endMs = System.currentTimeMillis()
+                    stages += CaptureStage(expectedPresses, startMs, endMs)
+                }
+                val candidates = correlatePressSequence(sniffFrames.toList(), stages)
+                _state.update { it.copy(candidates = candidates, pressSequence = null) }
+            } finally {
+                if (_state.value.pressSequence != null) {
+                    _state.update { it.copy(pressSequence = null) }
+                }
             }
         }
     }
 
-    fun analyzePattern() {
-        val candidates = correlatePressPattern(sniffFrames.toList(), pressWindows.toList())
-        _state.update { it.copy(candidates = candidates) }
+    fun cancelPressSequence() {
+        pressSequenceJob?.cancel()
+        pressSequenceJob = null
+        _state.update { it.copy(pressSequence = null) }
     }
 
     fun didSweep(moduleId: String, fromDid: Int, toDid: Int) {
@@ -595,6 +640,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun stopBackgroundJobs() {
+        cancelPressSequence()
         liveJob?.cancel()
         liveJob = null
         sniffJob?.cancel()
@@ -609,6 +655,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun stopBackgroundLocked() {
         cancelFlag.set(true)
+        cancelPressSequence()
         liveJob?.cancel()
         sniffJob?.cancel()
         longJob?.cancel()

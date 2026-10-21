@@ -152,6 +152,72 @@ class ProtocolTest {
     }
 
     @Test
+    fun correlatePressSequenceFindsButtonByte() {
+        // Stages: baseline 0..99, 1-press 100..199, 2-press 200..299, 3-press 300..399
+        val stages = listOf(
+            CaptureStage(0, 0, 99),
+            CaptureStage(1, 100, 199),
+            CaptureStage(2, 200, 299),
+            CaptureStage(3, 300, 399),
+        )
+        val frames = mutableListOf<CanFrame>()
+        // Stable baseline
+        frames += CanFrame(10, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(50, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        // 1 press → 1 change (and back)
+        frames += CanFrame(110, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(120, 0x3B3, byteArrayOf(0x00, 0x01), "")
+        frames += CanFrame(130, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        // 2 presses → 2 changes (press+release each = 4 edges; use k=2 path with 2 toggles = 4)
+        // Use single-edge-per-press: 2 value flips
+        frames += CanFrame(210, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(220, 0x3B3, byteArrayOf(0x00, 0x01), "")
+        frames += CanFrame(230, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(240, 0x3B3, byteArrayOf(0x00, 0x01), "")
+        frames += CanFrame(250, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        // 3 presses → 6 edges (k=2)
+        frames += CanFrame(310, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(320, 0x3B3, byteArrayOf(0x00, 0x01), "")
+        frames += CanFrame(330, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(340, 0x3B3, byteArrayOf(0x00, 0x01), "")
+        frames += CanFrame(350, 0x3B3, byteArrayOf(0x00, 0x00), "")
+        frames += CanFrame(360, 0x3B3, byteArrayOf(0x00, 0x01), "")
+        frames += CanFrame(370, 0x3B3, byteArrayOf(0x00, 0x00), "")
+
+        val c = correlatePressSequence(frames, stages)
+        assertFalse(c.isEmpty())
+        assertEquals(0x3B3, c[0].canId)
+        assertEquals(1, c[0].byteIndex)
+        assertTrue(c[0].changeScore >= 0.5)
+    }
+
+    @Test
+    fun correlatePressSequenceRejectsPeriodicCounter() {
+        val stages = listOf(
+            CaptureStage(0, 0, 99),
+            CaptureStage(1, 100, 199),
+            CaptureStage(2, 200, 299),
+            CaptureStage(3, 300, 399),
+        )
+        val frames = mutableListOf<CanFrame>()
+        var counter = 0
+        for (t in 0L..400 step 10) {
+            frames += CanFrame(t, 0x3B3, byteArrayOf(counter.toByte(), 0x00), "")
+            counter = (counter + 1) and 0xFF
+        }
+        val c = correlatePressSequence(frames, stages)
+        assertTrue(
+            "Periodic counter should be filtered out, got: $c",
+            c.none { it.canId == 0x3B3 && it.byteIndex == 0 },
+        )
+    }
+
+    @Test
+    fun sequenceSimilarityPerfectMatch() {
+        assertEquals(1.0, sequenceSimilarity(listOf(2.0, 4.0, 6.0), listOf(2.0, 4.0, 6.0)), 1e-9)
+    }
+
+    @Test
     fun diffDidSnapshotsDetectsChange() {
         val before = mapOf(0xF190 to "AA", 0xDE00 to "00")
         val after = mapOf(0xF190 to "BB", 0xDE00 to "00", 0xDE01 to "11")
