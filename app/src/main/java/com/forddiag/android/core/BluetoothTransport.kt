@@ -64,15 +64,21 @@ class BluetoothTransport private constructor(
     override fun readMonitorChunk(maxWaitMs: Long): String {
         val deadline = System.currentTimeMillis() + maxWaitMs
         val buf = StringBuilder()
-        while (System.currentTimeMillis() < deadline) {
-            if (input.available() > 0) {
-                val b = input.read()
-                if (b < 0) break
-                val c = b.toChar()
-                if (c == '>') break
-                buf.append(c)
-                if ((c == '\n' || c == '\r') && buf.length > 8) break
-                if (buf.length > 512) break
+        val maxLen = 8192
+        while (System.currentTimeMillis() < deadline && buf.length < maxLen) {
+            val available = input.available()
+            if (available > 0) {
+                val n = minOf(available, maxLen - buf.length)
+                val chunk = ByteArray(n)
+                val read = input.read(chunk)
+                if (read < 0) break
+                for (i in 0 until read) {
+                    val c = chunk[i].toInt().toChar()
+                    if (c == '>') {
+                        return buf.toString()
+                    }
+                    buf.append(c)
+                }
             } else {
                 if (buf.isNotEmpty()) break
                 sleepQuiet(10)

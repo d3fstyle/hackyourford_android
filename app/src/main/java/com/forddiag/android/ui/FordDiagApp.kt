@@ -61,7 +61,6 @@ import com.forddiag.android.core.CanBus
 import com.forddiag.android.core.CanFrame
 import com.forddiag.android.core.DiscoveredEcu
 import com.forddiag.android.core.DtcCatalog
-import com.forddiag.android.core.LiveSample
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
 import com.forddiag.android.core.PatternCandidate
@@ -84,7 +83,6 @@ private val TABS = listOf(
     TabDef(AppTab.ECUS, "ECUs", true),
     TabDef(AppTab.DTCS, "DTCs", true),
     TabDef(AppTab.LIVE, "Live", true),
-    TabDef(AppTab.DISCOVER, "Discover", true),
 )
 
 @Composable
@@ -134,6 +132,10 @@ fun FordDiagApp(viewModel: FordDiagViewModel) {
                         onDumpAsBuilt = viewModel::dumpAsBuilt,
                         onDiscover = viewModel::discoverEcus,
                         onStop = viewModel::stopActivity,
+                        onDidSweep = viewModel::didSweep,
+                        onSnapshot = viewModel::didSnapshot,
+                        onDiff = viewModel::diffSnapshots,
+                        onPinDid = viewModel::pinDid,
                     )
                 }
                 AppTab.DTCS -> if (connected) {
@@ -146,22 +148,13 @@ fun FordDiagApp(viewModel: FordDiagViewModel) {
                 AppTab.LIVE -> if (connected) {
                     LiveScreen(
                         state = state,
-                        onStart = viewModel::startLive,
-                        onStop = viewModel::stopLive,
-                        onSave = viewModel::saveLiveSession,
-                    )
-                }
-                AppTab.DISCOVER -> if (connected) {
-                    DiscoverScreen(
-                        state = state,
                         onStartSniff = viewModel::startSniff,
                         onStop = viewModel::stopActivity,
                         onStartPressSequence = viewModel::startPressSequence,
                         onCancelPressSequence = viewModel::cancelPressSequence,
-                        onDidSweep = viewModel::didSweep,
-                        onSnapshot = viewModel::didSnapshot,
-                        onDiff = viewModel::diffSnapshots,
-                        onPinDid = viewModel::pinDid,
+                        onFrameIdFilter = viewModel::setFrameIdFilter,
+                        onDismissAnalyzeEmpty = viewModel::dismissAnalyzeEmpty,
+                        onDismissAnalyzeResults = viewModel::dismissAnalyzeResults,
                     )
                 }
             }
@@ -321,17 +314,16 @@ private fun ExportMenuButton(
 private fun TabExportButton(
     tab: AppTab,
     state: UiState,
-    discoverMode: DiscoverExportMode = DiscoverExportMode.SNIFF,
 ) {
     val context = LocalContext.current
     ExportMenuButton(
-        enabled = tabExportAvailable(tab, state, discoverMode),
+        enabled = tabExportAvailable(tab, state),
         onCopy = {
-            val payload = buildTabExport(tab, state, discoverMode)
+            val payload = buildTabExport(tab, state)
             copyTextToClipboard(context, "FordDiag $tab", payload.plainText)
         },
         onExportCsv = {
-            val payload = buildTabExport(tab, state, discoverMode)
+            val payload = buildTabExport(tab, state)
             shareFile(
                 context,
                 exportCsvFilename(payload.filenamePrefix),
@@ -786,12 +778,23 @@ private fun EcusScreen(
     onDumpAsBuilt: (String) -> Unit,
     onDiscover: (CanBus, Int, Int) -> Unit,
     onStop: () -> Unit,
+    onDidSweep: (String, Int, Int) -> Unit,
+    onSnapshot: (String, Int, Int, String) -> Unit,
+    onDiff: () -> Unit,
+    onPinDid: (String, Int) -> Unit,
 ) {
-    val selected = state.modules.find { it.id == state.selectedModuleId }
     val context = LocalContext.current
     var bus by remember { mutableStateOf(CanBus.HS) }
     var fromId by remember { mutableStateOf("7E0") }
     var toId by remember { mutableStateOf("7EF") }
+    val profile = state.profiles.find { it.id == state.selectedProfileId }
+    var moduleId by remember { mutableStateOf(profile?.modules?.firstOrNull()?.id ?: "PCM") }
+    var fromDid by remember { mutableStateOf("F190") }
+    var toDid by remember { mutableStateOf("F1FF") }
+    var moduleExpanded by remember { mutableStateOf(false) }
+    val parseDid = { s: String ->
+        s.trim().removePrefix("0x").removePrefix("0X").toIntOrNull(16) ?: 0
+    }
 
     Column(
         modifier = Modifier
@@ -805,7 +808,7 @@ private fun EcusScreen(
             subtitle = "${state.status?.vin ?: "VIN unknown"} · ${state.modules.count { it.online }}/${state.modules.size} online · ${state.discovered.size} discovered",
         ) {
             TabExportButton(tab = AppTab.ECUS, state = state)
-            if (state.discoverProgress != null) {
+            if (state.discoverProgress != null || state.busy != null) {
                 OutlinedButton(onClick = onStop) {
                     Text("Stop", maxLines = 1, softWrap = false)
                 }
@@ -862,6 +865,110 @@ private fun EcusScreen(
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                 )
+            }
+        }
+
+        // DID sweep
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, Line)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("DID SWEEP", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+            @OptIn(ExperimentalMaterial3Api::class)
+            ExposedDropdownMenuBox(expanded = moduleExpanded, onExpandedChange = { moduleExpanded = it }) {
+                OutlinedTextField(
+                    value = moduleId,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Module") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(moduleExpanded) },
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
+                    colors = fieldColors(),
+                )
+                ExposedDropdownMenu(expanded = moduleExpanded, onDismissRequest = { moduleExpanded = false }) {
+                    profile?.modules?.forEach { m ->
+                        DropdownMenuItem(
+                            text = { Text("${m.id} — ${m.name}") },
+                            onClick = {
+                                moduleId = m.id
+                                moduleExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = fromDid,
+                    onValueChange = { fromDid = it },
+                    label = { Text("From DID") },
+                    modifier = Modifier.weight(1f),
+                    colors = fieldColors(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = toDid,
+                    onValueChange = { toDid = it },
+                    label = { Text("To DID") },
+                    modifier = Modifier.weight(1f),
+                    colors = fieldColors(),
+                    singleLine = true,
+                )
+            }
+            ActionBar {
+                Button(
+                    onClick = { onDidSweep(moduleId, parseDid(fromDid), parseDid(toDid)) },
+                    enabled = state.busy == null,
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = BgDeep),
+                ) { Text("Sweep", maxLines = 1, softWrap = false) }
+                OutlinedButton(
+                    onClick = { onSnapshot(moduleId, parseDid(fromDid), parseDid(toDid), "before") },
+                    enabled = state.busy == null,
+                ) { Text("Before", maxLines = 1, softWrap = false) }
+                OutlinedButton(
+                    onClick = { onSnapshot(moduleId, parseDid(fromDid), parseDid(toDid), "after") },
+                    enabled = state.busy == null,
+                ) { Text("After", maxLines = 1, softWrap = false) }
+                OutlinedButton(onClick = onDiff) {
+                    Text("Diff", maxLines = 1, softWrap = false)
+                }
+            }
+            if (state.sweptDids.isNotEmpty()) {
+                Text("FOUND DIDs (${state.sweptDids.size})", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+                state.sweptDids.forEach { did ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPinDid(moduleId, did.did) }
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("0x%04X".format(did.did), color = Accent, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                        Text(
+                            did.ascii ?: did.hex,
+                            color = TextPrimary,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).padding(start = 8.dp),
+                        )
+                    }
+                }
+            }
+            if (state.didDiffs.isNotEmpty()) {
+                Text("DIFF", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+                state.didDiffs.forEach { (did, before, after) ->
+                    Text(
+                        "0x%04X  %s → %s".format(did, before.ifEmpty { "—" }, after),
+                        color = TextPrimary,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         }
 
@@ -1116,17 +1223,23 @@ private fun DtcGroupCard(group: ModuleDtcGroup, busy: Boolean, onClear: () -> Un
 @Composable
 private fun LiveScreen(
     state: UiState,
-    onStart: () -> Unit,
+    onStartSniff: (CanBus) -> Unit,
     onStop: () -> Unit,
-    onSave: () -> String,
+    onStartPressSequence: () -> Unit,
+    onCancelPressSequence: () -> Unit,
+    onFrameIdFilter: (String) -> Unit,
+    onDismissAnalyzeEmpty: () -> Unit,
+    onDismissAnalyzeResults: () -> Unit,
 ) {
     val context = LocalContext.current
     val listState = rememberLazyListState()
-    val stream = state.liveStream
+    var bus by remember { mutableStateOf(CanBus.MS) }
+    val frames = state.frames
+    val pressSeq = state.pressSequence
 
-    LaunchedEffect(stream.size) {
-        if (stream.isNotEmpty()) {
-            listState.scrollToItem(stream.lastIndex)
+    LaunchedEffect(frames.lastOrNull()?.tsMs, frames.size) {
+        if (frames.isNotEmpty()) {
+            listState.scrollToItem(frames.lastIndex)
         }
     }
 
@@ -1138,12 +1251,14 @@ private fun LiveScreen(
     ) {
         ScreenToolbar(
             title = "Live",
-            subtitle = "Real-time stream · UDS DIDs and Mode 01 PIDs",
+            subtitle = "CAN monitor · press-pattern Analyze",
         ) {
             TabExportButton(tab = AppTab.LIVE, state = state)
-            if (!state.liveRunning) {
+            BusChip("HS", bus == CanBus.HS && !state.sniffing) { if (!state.sniffing) bus = CanBus.HS }
+            BusChip("MS", bus == CanBus.MS && !state.sniffing) { if (!state.sniffing) bus = CanBus.MS }
+            if (!state.sniffing) {
                 Button(
-                    onClick = onStart,
+                    onClick = { onStartSniff(bus) },
                     enabled = state.busy == null,
                     colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = BgDeep),
                 ) { Text("Start", maxLines = 1, softWrap = false) }
@@ -1151,18 +1266,35 @@ private fun LiveScreen(
                 OutlinedButton(onClick = onStop) {
                     Text("Stop", maxLines = 1, softWrap = false)
                 }
+                OutlinedButton(
+                    onClick = onStartPressSequence,
+                    enabled = pressSeq == null,
+                ) {
+                    Text("Analyze", maxLines = 1, softWrap = false)
+                }
             }
-            OutlinedButton(
-                onClick = {
-                    val json = onSave()
-                    shareJson(context, "forddiag-live.json", json, "Share live session")
-                },
-                enabled = stream.isNotEmpty(),
-            ) { Text("Save", maxLines = 1, softWrap = false) }
         }
 
-        if (stream.isEmpty()) {
-            Text("Start live polling to see PID/DID samples.", color = TextMuted)
+        OutlinedTextField(
+            value = state.frameIdFilter,
+            onValueChange = onFrameIdFilter,
+            label = { Text("Filter ID") },
+            placeholder = { Text("e.g. 3E8 or 0x3E8") },
+            modifier = Modifier.fillMaxWidth(),
+            colors = fieldColors(),
+            singleLine = true,
+        )
+
+        val filteredCount = frames.size
+        Text(
+            "FRAMES ($filteredCount/${state.framesTotal})",
+            color = TextMuted,
+            fontSize = 11.sp,
+            letterSpacing = 1.sp,
+        )
+
+        if (!state.sniffing && frames.isEmpty()) {
+            Text("Start monitoring to see CAN frames as they arrive.", color = TextMuted)
         } else {
             LazyColumn(
                 state = listState,
@@ -1172,219 +1304,36 @@ private fun LiveScreen(
                     .border(1.dp, Line)
                     .background(Bg),
             ) {
-                items(stream, key = { "${it.tsMs}-${it.source}-${it.id}-${it.hashCode()}" }) { sample ->
-                    LiveSampleRow(sample)
+                items(
+                    frames,
+                    key = { "${it.tsMs}-${it.id}-${it.rawLine}-${it.hashCode()}" },
+                ) { frame ->
+                    FrameRow(frame)
                 }
             }
         }
-    }
-}
 
-@Composable
-private fun LiveSampleRow(sample: LiveSample) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            "%s %s".format(
-                if (sample.source.name == "PID") "PID" else "DID",
-                if (sample.source.name == "PID") "%02X".format(sample.id) else "0x%04X".format(sample.id),
-            ),
-            color = TextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            modifier = Modifier.width(90.dp),
-        )
-        Text(
-            sample.decoded ?: sample.rawHex,
-            color = TextPrimary,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        sample.moduleId?.let {
-            Text(it, color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(start = 8.dp))
-        }
-    }
-}
-
-@Composable
-private fun DiscoverScreen(
-    state: UiState,
-    onStartSniff: (CanBus) -> Unit,
-    onStop: () -> Unit,
-    onStartPressSequence: () -> Unit,
-    onCancelPressSequence: () -> Unit,
-    onDidSweep: (String, Int, Int) -> Unit,
-    onSnapshot: (String, Int, Int, String) -> Unit,
-    onDiff: () -> Unit,
-    onPinDid: (String, Int) -> Unit,
-) {
-    var mode by remember { mutableStateOf("sniff") }
-    var bus by remember { mutableStateOf(CanBus.MS) }
-    val profile = state.profiles.find { it.id == state.selectedProfileId }
-    var moduleId by remember { mutableStateOf(profile?.modules?.firstOrNull()?.id ?: "PCM") }
-    var fromDid by remember { mutableStateOf("F190") }
-    var toDid by remember { mutableStateOf("F1FF") }
-    var moduleExpanded by remember { mutableStateOf(false) }
-    val discoverMode =
-        if (mode == "did") DiscoverExportMode.DID else DiscoverExportMode.SNIFF
-    val pressSeq = state.pressSequence
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        ScreenToolbar(
-            title = "Discover",
-            subtitle = "CAN sniffer + press-pattern · UDS DID sweep",
-        ) {
-            TabExportButton(tab = AppTab.DISCOVER, state = state, discoverMode = discoverMode)
-            BusChip("Sniff", mode == "sniff") { mode = "sniff" }
-            BusChip("DID", mode == "did") { mode = "did" }
-        }
-
-        if (mode == "sniff") {
-            ActionBar {
-                BusChip("HS", bus == CanBus.HS && !state.sniffing) { if (!state.sniffing) bus = CanBus.HS }
-                BusChip("MS", bus == CanBus.MS && !state.sniffing) { if (!state.sniffing) bus = CanBus.MS }
-                if (!state.sniffing) {
-                    Button(
-                        onClick = { onStartSniff(bus) },
-                        enabled = state.busy == null,
-                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = BgDeep),
-                    ) { Text("Start", maxLines = 1, softWrap = false) }
-                } else {
-                    OutlinedButton(onClick = onStop) {
-                        Text("Stop", maxLines = 1, softWrap = false)
-                    }
-                    OutlinedButton(
-                        onClick = onStartPressSequence,
-                        enabled = pressSeq == null,
-                    ) {
-                        Text("Analyze press", maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-
-            Text("FRAMES (${state.frames.size})", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
-            state.frames.takeLast(40).asReversed().forEach { FrameRow(it) }
-
-            if (state.candidates.isNotEmpty()) {
-                Text("CANDIDATES", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
-                state.candidates.forEach { CandidateRow(it) }
-            }
-        } else {
-            @OptIn(ExperimentalMaterial3Api::class)
-            ExposedDropdownMenuBox(expanded = moduleExpanded, onExpandedChange = { moduleExpanded = it }) {
-                OutlinedTextField(
-                    value = moduleId,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Module") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(moduleExpanded) },
-                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
-                    colors = fieldColors(),
-                )
-                ExposedDropdownMenu(expanded = moduleExpanded, onDismissRequest = { moduleExpanded = false }) {
-                    profile?.modules?.forEach { m ->
-                        DropdownMenuItem(
-                            text = { Text("${m.id} — ${m.name}") },
-                            onClick = {
-                                moduleId = m.id
-                                moduleExpanded = false
-                            },
+        if (state.candidates.isNotEmpty() && !state.analyzeResultsOpen) {
+            Text("CANDIDATES", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+            state.candidates.forEach { c ->
+                CandidateRow(
+                    c = c,
+                    onCopyId = {
+                        val id = "0x%03X".format(c.canId)
+                        copyTextToClipboard(context, "CAN ID", id)
+                        onFrameIdFilter(id)
+                    },
+                    onExport = {
+                        val payload = exportCandidatePayload(c)
+                        shareFile(
+                            context,
+                            exportCsvFilename(payload.filenamePrefix),
+                            payload.csv,
+                            "text/csv",
+                            "Export candidate",
                         )
-                    }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = fromDid,
-                    onValueChange = { fromDid = it },
-                    label = { Text("From DID") },
-                    modifier = Modifier.weight(1f),
-                    colors = fieldColors(),
-                    singleLine = true,
+                    },
                 )
-                OutlinedTextField(
-                    value = toDid,
-                    onValueChange = { toDid = it },
-                    label = { Text("To DID") },
-                    modifier = Modifier.weight(1f),
-                    colors = fieldColors(),
-                    singleLine = true,
-                )
-            }
-            val parseDid = { s: String ->
-                s.trim().removePrefix("0x").removePrefix("0X").toIntOrNull(16) ?: 0
-            }
-            ActionBar {
-                Button(
-                    onClick = { onDidSweep(moduleId, parseDid(fromDid), parseDid(toDid)) },
-                    enabled = state.busy == null,
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = BgDeep),
-                ) { Text("Sweep", maxLines = 1, softWrap = false) }
-                OutlinedButton(
-                    onClick = { onSnapshot(moduleId, parseDid(fromDid), parseDid(toDid), "before") },
-                    enabled = state.busy == null,
-                ) { Text("Before", maxLines = 1, softWrap = false) }
-                OutlinedButton(
-                    onClick = { onSnapshot(moduleId, parseDid(fromDid), parseDid(toDid), "after") },
-                    enabled = state.busy == null,
-                ) { Text("After", maxLines = 1, softWrap = false) }
-                OutlinedButton(onClick = onDiff) {
-                    Text("Diff", maxLines = 1, softWrap = false)
-                }
-                if (state.busy != null) {
-                    OutlinedButton(onClick = onStop) {
-                        Text("Stop", maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-
-            if (state.sweptDids.isNotEmpty()) {
-                Text("FOUND DIDs (${state.sweptDids.size})", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
-                state.sweptDids.forEach { did ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPinDid(moduleId, did.did) }
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("0x%04X".format(did.did), color = Accent, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                        Text(
-                            did.ascii ?: did.hex,
-                            color = TextPrimary,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f).padding(start = 8.dp),
-                        )
-                    }
-                }
-            }
-
-            if (state.didDiffs.isNotEmpty()) {
-                Text("DIFF", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
-                state.didDiffs.forEach { (did, before, after) ->
-                    Text(
-                        "0x%04X  %s → %s".format(did, before.ifEmpty { "—" }, after),
-                        color = TextPrimary,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                    )
-                }
             }
         }
     }
@@ -1416,6 +1365,66 @@ private fun DiscoverScreen(
             },
         )
     }
+
+    if (state.analyzeEmpty) {
+        AlertDialog(
+            onDismissRequest = onDismissAnalyzeEmpty,
+            title = { Text("Analyze") },
+            text = {
+                Text(
+                    "No se detectó ninguna trama relevante",
+                    color = TextPrimary,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onDismissAnalyzeEmpty) { Text("Cerrar") }
+            },
+        )
+    }
+
+    if (state.analyzeResultsOpen) {
+        AlertDialog(
+            onDismissRequest = onDismissAnalyzeResults,
+            title = { Text("Candidatos (${state.candidates.size})") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Pulsa una fila para copiar el ID. Export guarda solo ese análisis.",
+                        color = TextMuted,
+                        fontSize = 12.sp,
+                    )
+                    state.candidates.forEach { c ->
+                        CandidateRow(
+                            c = c,
+                            onCopyId = {
+                                val id = "0x%03X".format(c.canId)
+                                copyTextToClipboard(context, "CAN ID", id)
+                                onFrameIdFilter(id)
+                            },
+                            onExport = {
+                                val payload = exportCandidatePayload(c)
+                                shareFile(
+                                    context,
+                                    exportCsvFilename(payload.filenamePrefix),
+                                    payload.csv,
+                                    "text/csv",
+                                    "Export candidate",
+                                )
+                            },
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onDismissAnalyzeResults) { Text("Cerrar") }
+            },
+        )
+    }
 }
 
 @Composable
@@ -1425,23 +1434,40 @@ private fun FrameRow(frame: CanFrame) {
         color = TextPrimary,
         fontFamily = FontFamily.Monospace,
         fontSize = 11.sp,
-        modifier = Modifier.padding(vertical = 2.dp),
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
     )
 }
 
 @Composable
-private fun CandidateRow(c: PatternCandidate) {
-    Text(
-        "0x%03X byte[%d]%s  score=%.2f".format(
-            c.canId,
-            c.byteIndex,
-            c.bitIndex?.let { " bit$it" } ?: "",
-            c.changeScore,
-        ),
-        color = Accent,
-        fontFamily = FontFamily.Monospace,
-        fontSize = 12.sp,
-    )
+private fun CandidateRow(
+    c: PatternCandidate,
+    onCopyId: () -> Unit,
+    onExport: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onCopyId)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "0x%03X byte[%d]%s  score=%.2f".format(
+                c.canId,
+                c.byteIndex,
+                c.bitIndex?.let { " bit$it" } ?: "",
+                c.changeScore,
+            ),
+            color = Accent,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onExport) {
+            Text("Export", fontSize = 11.sp)
+        }
+    }
 }
 
 private fun shareJson(context: android.content.Context, filename: String, json: String, title: String) {

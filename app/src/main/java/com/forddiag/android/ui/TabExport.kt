@@ -10,8 +10,6 @@ import com.forddiag.android.core.CanFrame
 import com.forddiag.android.core.ConnectionStatus
 import com.forddiag.android.core.DiscoveredEcu
 import com.forddiag.android.core.DtcCatalog
-import com.forddiag.android.core.LiveSample
-import com.forddiag.android.core.LiveSource
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
 import com.forddiag.android.core.PatternCandidate
@@ -27,37 +25,51 @@ data class TabExportPayload(
     val filenamePrefix: String,
 )
 
-enum class DiscoverExportMode { SNIFF, DID }
-
-fun tabExportAvailable(
-    tab: AppTab,
-    state: UiState,
-    discoverMode: DiscoverExportMode = DiscoverExportMode.SNIFF,
-): Boolean = when (tab) {
+fun tabExportAvailable(tab: AppTab, state: UiState): Boolean = when (tab) {
     AppTab.HOME -> state.status != null
     AppTab.PROFILES -> false
-    AppTab.ECUS -> state.modules.isNotEmpty() || state.discovered.isNotEmpty()
+    AppTab.ECUS ->
+        state.modules.isNotEmpty() ||
+            state.discovered.isNotEmpty() ||
+            state.sweptDids.isNotEmpty() ||
+            state.didDiffs.isNotEmpty()
     AppTab.DTCS -> state.dtcGroups.isNotEmpty()
-    AppTab.LIVE -> state.liveStream.isNotEmpty()
-    AppTab.DISCOVER -> when (discoverMode) {
-        DiscoverExportMode.SNIFF ->
-            state.frames.isNotEmpty() || state.candidates.isNotEmpty()
-        DiscoverExportMode.DID ->
-            state.sweptDids.isNotEmpty() || state.didDiffs.isNotEmpty()
-    }
+    AppTab.LIVE -> state.frames.isNotEmpty() || state.candidates.isNotEmpty()
 }
 
-fun buildTabExport(
-    tab: AppTab,
-    state: UiState,
-    discoverMode: DiscoverExportMode = DiscoverExportMode.SNIFF,
-): TabExportPayload = when (tab) {
+fun buildTabExport(tab: AppTab, state: UiState): TabExportPayload = when (tab) {
     AppTab.HOME -> exportHome(state.status)
     AppTab.PROFILES -> error("Profiles tab has no export payload")
     AppTab.ECUS -> exportEcus(state)
     AppTab.DTCS -> exportDtcs(state.dtcGroups)
-    AppTab.LIVE -> exportLive(state.liveStream)
-    AppTab.DISCOVER -> exportDiscover(state, discoverMode)
+    AppTab.LIVE -> exportLiveSniff(state)
+}
+
+fun exportCandidatePayload(c: PatternCandidate): TabExportPayload {
+    val idHex = "0x%03X".format(c.canId)
+    val bit = c.bitIndex?.let { " bit$it" } ?: ""
+    val plain = buildString {
+        appendLine("CAN ID: $idHex")
+        appendLine("byte[%d]%s".format(c.byteIndex, bit))
+        appendLine("score=%.2f".format(c.changeScore))
+        if (c.sampleValues.isNotEmpty()) {
+            appendLine("samples:")
+            c.sampleValues.forEach { appendLine("  $it") }
+        }
+    }.trimEnd()
+    val csv = buildString {
+        appendLine(csvRow("canId", "byteIndex", "bitIndex", "score", "samples"))
+        appendLine(
+            csvRow(
+                idHex,
+                c.byteIndex.toString(),
+                c.bitIndex?.toString().orEmpty(),
+                "%.2f".format(c.changeScore),
+                c.sampleValues.joinToString("|"),
+            ),
+        )
+    }
+    return TabExportPayload(plain, csv.trimEnd(), "forddiag-candidate-$idHex")
 }
 
 fun copyTextToClipboard(context: Context, label: String, text: String) {
@@ -133,18 +145,6 @@ private fun formatDiscoveredLine(ecu: DiscoveredEcu): String =
 private fun formatModuleMeta(module: ModuleScanResult): String =
     "%s · 0x%03X · %s".format(module.id, module.txId, module.bus.name)
 
-private fun formatLiveSampleLine(sample: LiveSample): String {
-    val kind = if (sample.source == LiveSource.PID) "PID" else "DID"
-    val id = if (sample.source == LiveSource.PID) {
-        "%02X".format(sample.id)
-    } else {
-        "0x%04X".format(sample.id)
-    }
-    val value = sample.decoded ?: sample.rawHex
-    val module = sample.moduleId?.let { "\t$it" } ?: ""
-    return "$kind $id\t$value$module"
-}
-
 private fun formatFrameLine(frame: CanFrame): String =
     "0x%03X  %s".format(
         frame.id,
@@ -186,6 +186,21 @@ private fun exportEcus(state: UiState): TabExportPayload {
                 state.asBuiltJson?.let { appendLine(it) }
             }
             appendLine()
+        }
+        if (state.sweptDids.isNotEmpty()) {
+            appendLine("FOUND DIDs (${state.sweptDids.size})")
+            state.sweptDids.forEach { did ->
+                appendLine("0x%04X\t%s".format(did.did, did.ascii ?: did.hex))
+            }
+            appendLine()
+        }
+        if (state.didDiffs.isNotEmpty()) {
+            appendLine("DIFF")
+            state.didDiffs.forEach { (did, before, after) ->
+                appendLine(
+                    "0x%04X  %s → %s".format(did, before.ifEmpty { "—" }, after),
+                )
+            }
         }
     }.trimEnd()
 
@@ -277,6 +292,34 @@ private fun exportEcus(state: UiState): TabExportPayload {
                 }
             }
         }
+        state.sweptDids.forEach { did ->
+            appendLine(
+                csvRow(
+                    "did",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "0x%04X".format(did.did),
+                    did.ascii ?: did.hex,
+                ),
+            )
+        }
+        state.didDiffs.forEach { (did, before, after) ->
+            appendLine(
+                csvRow(
+                    "diff",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "0x%04X".format(did),
+                    "%s → %s".format(before.ifEmpty { "—" }, after),
+                ),
+            )
+        }
     }
     return TabExportPayload(plain, csv.trimEnd(), "forddiag-ecus")
 }
@@ -367,41 +410,14 @@ private fun exportDtcs(groups: List<ModuleDtcGroup>): TabExportPayload {
     return TabExportPayload(plain, csv.trimEnd(), "forddiag-dtcs")
 }
 
-private fun exportLive(stream: List<LiveSample>): TabExportPayload {
-    val plain = stream.joinToString("\n") { formatLiveSampleLine(it) }
-    val csv = buildString {
-        appendLine(csvRow("source", "id", "value", "moduleId"))
-        stream.forEach { sample ->
-            val source = if (sample.source == LiveSource.PID) "PID" else "DID"
-            val id = if (sample.source == LiveSource.PID) {
-                "%02X".format(sample.id)
-            } else {
-                "0x%04X".format(sample.id)
-            }
-            appendLine(
-                csvRow(
-                    source,
-                    id,
-                    sample.decoded ?: sample.rawHex,
-                    sample.moduleId.orEmpty(),
-                ),
-            )
-        }
-    }
-    return TabExportPayload(plain, csv.trimEnd(), "forddiag-live")
-}
-
-private fun exportDiscover(state: UiState, mode: DiscoverExportMode): TabExportPayload =
-    when (mode) {
-        DiscoverExportMode.SNIFF -> exportDiscoverSniff(state)
-        DiscoverExportMode.DID -> exportDiscoverDid(state)
-    }
-
-private fun exportDiscoverSniff(state: UiState): TabExportPayload {
-    val visibleFrames = state.frames.takeLast(40).asReversed()
+private fun exportLiveSniff(state: UiState): TabExportPayload {
+    val visibleFrames = state.frames.takeLast(80)
     val plain = buildString {
         if (visibleFrames.isNotEmpty()) {
-            appendLine("FRAMES (${state.frames.size})")
+            appendLine("FRAMES (${visibleFrames.size}/${state.framesTotal})")
+            if (state.frameIdFilter.isNotBlank()) {
+                appendLine("filter=${state.frameIdFilter.trim()}")
+            }
             visibleFrames.forEach { appendLine(formatFrameLine(it)) }
         }
         if (state.candidates.isNotEmpty()) {
@@ -412,79 +428,27 @@ private fun exportDiscoverSniff(state: UiState): TabExportPayload {
     }.trimEnd()
 
     val csv = buildString {
-        if (state.frames.isNotEmpty()) {
-            appendLine(csvRow("section", "canId", "data", "extra"))
-            state.frames.forEach { frame ->
-                appendLine(
-                    csvRow(
-                        "frame",
-                        "0x%03X".format(frame.id),
-                        frame.data.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) },
-                        "",
-                    ),
-                )
-            }
-        }
-        if (state.candidates.isNotEmpty()) {
-            if (state.frames.isEmpty()) {
-                appendLine(csvRow("section", "canId", "data", "extra"))
-            }
-            state.candidates.forEach { c ->
-                appendLine(
-                    csvRow(
-                        "candidate",
-                        "0x%03X".format(c.canId),
-                        "byte[%d]%s".format(c.byteIndex, c.bitIndex?.let { " bit$it" } ?: ""),
-                        "%.2f".format(c.changeScore),
-                    ),
-                )
-            }
-        }
-    }
-    return TabExportPayload(plain, csv.trimEnd(), "forddiag-discover-sniff")
-}
-
-private fun exportDiscoverDid(state: UiState): TabExportPayload {
-    val plain = buildString {
-        if (state.sweptDids.isNotEmpty()) {
-            appendLine("FOUND DIDs (${state.sweptDids.size})")
-            state.sweptDids.forEach { did ->
-                appendLine("0x%04X\t%s".format(did.did, did.ascii ?: did.hex))
-            }
-        }
-        if (state.didDiffs.isNotEmpty()) {
-            if (isNotEmpty()) appendLine()
-            appendLine("DIFF")
-            state.didDiffs.forEach { (did, before, after) ->
-                appendLine(
-                    "0x%04X  %s → %s".format(did, before.ifEmpty { "—" }, after),
-                )
-            }
-        }
-    }.trimEnd()
-
-    val csv = buildString {
-        appendLine(csvRow("section", "did", "before", "after_or_value"))
-        state.sweptDids.forEach { did ->
+        appendLine(csvRow("section", "canId", "data", "extra"))
+        visibleFrames.forEach { frame ->
             appendLine(
                 csvRow(
-                    "did",
-                    "0x%04X".format(did.did),
+                    "frame",
+                    "0x%03X".format(frame.id),
+                    frame.data.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) },
                     "",
-                    did.ascii ?: did.hex,
                 ),
             )
         }
-        state.didDiffs.forEach { (did, before, after) ->
+        state.candidates.forEach { c ->
             appendLine(
                 csvRow(
-                    "diff",
-                    "0x%04X".format(did),
-                    before.ifEmpty { "—" },
-                    after,
+                    "candidate",
+                    "0x%03X".format(c.canId),
+                    "byte[%d]%s".format(c.byteIndex, c.bitIndex?.let { " bit$it" } ?: ""),
+                    "%.2f".format(c.changeScore),
                 ),
             )
         }
     }
-    return TabExportPayload(plain, csv.trimEnd(), "forddiag-discover-did")
+    return TabExportPayload(plain, csv.trimEnd(), "forddiag-live")
 }

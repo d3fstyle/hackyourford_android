@@ -16,9 +16,6 @@ import com.forddiag.android.core.DidValue
 import com.forddiag.android.core.DtcCatalog
 import com.forddiag.android.core.EcuDiscoverProgress
 import com.forddiag.android.core.LiveDidPin
-import com.forddiag.android.core.LiveSample
-import com.forddiag.android.core.LiveSessionFile
-import com.forddiag.android.core.LiveSource
 import com.forddiag.android.core.ModuleDef
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
@@ -45,7 +42,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
-enum class AppTab { HOME, PROFILES, ECUS, DTCS, LIVE, DISCOVER }
+enum class AppTab { HOME, PROFILES, ECUS, DTCS, LIVE }
 
 data class UiState(
     val tab: AppTab = AppTab.HOME,
@@ -64,14 +61,20 @@ data class UiState(
     val dtcGroups: List<ModuleDtcGroup> = emptyList(),
     val discovered: List<DiscoveredEcu> = emptyList(),
     val discoverProgress: EcuDiscoverProgress? = null,
-    val liveRunning: Boolean = false,
-    val liveStream: List<LiveSample> = emptyList(),
-    val liveJson: String? = null,
     val sniffing: Boolean = false,
+    /** Visible (filtered) frames for the Live list. */
     val frames: List<CanFrame> = emptyList(),
+    /** Unfiltered ring-buffer size (for FRAMES filtered/total). */
+    val framesTotal: Int = 0,
+    /** Hex CAN ID filter text (empty = all). */
+    val frameIdFilter: String = "",
     val candidates: List<PatternCandidate> = emptyList(),
     /** Non-null while a guided press-capture sequence is running. */
     val pressSequence: PressSequenceUi? = null,
+    /** True after Analyze finishes with zero candidates. */
+    val analyzeEmpty: Boolean = false,
+    /** True after Analyze finishes with one or more candidates (results dialog). */
+    val analyzeResultsOpen: Boolean = false,
     val sweptDids: List<DidValue> = emptyList(),
     val didDiffs: List<Triple<Int, String, String>> = emptyList(),
     val busy: String? = null,
@@ -84,18 +87,18 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     private var session: ScannerSession? = null
     private val mutex = Mutex()
-    private var liveJob: Job? = null
     private var sniffJob: Job? = null
     private var longJob: Job? = null
     private val cancelFlag = AtomicBoolean(false)
 
-    private val liveSamples = mutableListOf<LiveSample>()
-    private var liveStartedAt = 0L
     private var pressSequenceJob: Job? = null
     private var snapshotBefore: Map<Int, String> = emptyMap()
     private var snapshotAfter: Map<Int, String> = emptyMap()
     private val pinnedDids = mutableListOf<LiveDidPin>()
     private val sniffFrames = mutableListOf<CanFrame>()
+    /** Frames captured only while Analyze is running (not ring-trimmed). */
+    private val analyzeCapture = mutableListOf<CanFrame>()
+    private var capturingAnalyze = false
 
     companion object {
         const val PRESS_STAGE_MS = 5_000L
@@ -351,112 +354,23 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun startLive() {
-        stopBackgroundJobs()
-        val profile = session?.profile()
-        var pids = listOf(0x0C, 0x0D, 0x05, 0x11)
-        val defaultDids = profile?.modules?.flatMap { m ->
-            m.dids.filter { !it.asBuilt }.take(2).map { LiveDidPin(m.id, it.did, it.label) }
-        }.orEmpty()
-        val dids = defaultDids + pinnedDids
-
-        liveJob = viewModelScope.launch {
-            _state.update {
-                it.copy(busy = "Starting live…", error = null, liveStream = emptyList(), liveJson = null)
-            }
-            try {
-                withContext(Dispatchers.IO) {
-                    mutex.withLock {
-                        val s = session ?: throw IllegalStateException("Not connected")
-                        val supported = runCatching { s.listSupportedObdPids() }.getOrDefault(emptyList())
-                        if (supported.isNotEmpty()) {
-                            val preferred = listOf(0x0C, 0x0D, 0x05, 0x0F, 0x11, 0x04, 0x42)
-                            val filtered = supported.filter { it in preferred }
-                            pids = filtered.ifEmpty { supported.take(6) }
-                        }
-                    }
-                }
-                liveSamples.clear()
-                liveStartedAt = System.currentTimeMillis()
-                _state.update {
-                    it.copy(busy = null, liveRunning = true, tab = AppTab.LIVE, error = null)
-                }
-                var emptyCycles = 0
-                while (isActive) {
-                    val samples = withContext(Dispatchers.IO) {
-                        mutex.withLock {
-                            session?.pollLiveOnce(pids, dids).orEmpty()
-                        }
-                    }
-                    if (samples.isNotEmpty()) {
-                        emptyCycles = 0
-                        liveSamples += samples
-                        val stream = liveSamples.takeLast(200)
-                        _state.update { it.copy(liveStream = stream, error = null) }
-                    } else {
-                        emptyCycles++
-                        if (emptyCycles >= 3) {
-                            val why = session?.lastLiveError ?: "no PID/DID responses"
-                            _state.update {
-                                it.copy(error = "Live: $why")
-                            }
-                        }
-                    }
-                    delay(300)
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.toString(), liveRunning = false) }
-            } finally {
-                _state.update { it.copy(liveRunning = false, busy = null) }
-            }
-        }
-    }
-
-    fun stopLive() {
-        liveJob?.cancel()
-        liveJob = null
-        _state.update { it.copy(liveRunning = false) }
-    }
-
-    fun saveLiveSession(): String {
-        val s = session ?: throw IllegalStateException("Not connected")
-        val file = LiveSessionFile(
-            startedAtUnixMs = liveStartedAt,
-            profileId = s.profile()?.id,
-            address = s.address(),
-            samples = liveSamples.toList(),
-        )
-        // Manual JSON to avoid needing @Serializable on all nested types in this pass
-        val jsonStr = buildString {
-            appendLine("{")
-            appendLine("  \"started_at_unix_ms\": ${file.startedAtUnixMs},")
-            appendLine("  \"profile_id\": ${file.profileId?.let { "\"$it\"" } ?: "null"},")
-            appendLine("  \"address\": \"${file.address}\",")
-            appendLine("  \"samples\": [")
-            file.samples.forEachIndexed { i, sample ->
-                append("    {")
-                append("\"ts_ms\": ${sample.tsMs}, ")
-                append("\"source\": \"${if (sample.source == LiveSource.PID) "pid" else "did"}\", ")
-                append("\"id\": ${sample.id}, ")
-                append("\"raw_hex\": \"${sample.rawHex}\", ")
-                append("\"decoded\": ${sample.decoded?.let { "\"$it\"" } ?: "null"}, ")
-                append("\"module_id\": ${sample.moduleId?.let { "\"$it\"" } ?: "null"}, ")
-                append("\"label\": ${sample.label?.let { "\"$it\"" } ?: "null"}")
-                append("}")
-                if (i < file.samples.lastIndex) append(",")
-                appendLine()
-            }
-            appendLine("  ]")
-            appendLine("}")
-        }
-        _state.update { it.copy(liveJson = jsonStr) }
-        return jsonStr
-    }
-
     fun pinDid(moduleId: String, did: Int) {
         if (pinnedDids.none { it.moduleId == moduleId && it.did == did }) {
             pinnedDids += LiveDidPin(moduleId, did, "0x%04X".format(did))
         }
+    }
+
+    fun setFrameIdFilter(text: String) {
+        _state.update { it.copy(frameIdFilter = text) }
+        publishFrames()
+    }
+
+    fun dismissAnalyzeEmpty() {
+        _state.update { it.copy(analyzeEmpty = false) }
+    }
+
+    fun dismissAnalyzeResults() {
+        _state.update { it.copy(analyzeResultsOpen = false) }
     }
 
     fun startSniff(bus: CanBus) {
@@ -465,11 +379,14 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         sniffJob = viewModelScope.launch {
             _state.update {
                 it.copy(
-                    busy = "Starting sniff…",
+                    busy = "Starting live…",
                     error = null,
                     frames = emptyList(),
+                    framesTotal = 0,
                     candidates = emptyList(),
                     pressSequence = null,
+                    analyzeEmpty = false,
+                    analyzeResultsOpen = false,
                 )
             }
             try {
@@ -480,7 +397,9 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 sniffFrames.clear()
-                _state.update { it.copy(busy = null, sniffing = true, tab = AppTab.DISCOVER) }
+                analyzeCapture.clear()
+                capturingAnalyze = false
+                _state.update { it.copy(busy = null, sniffing = true, tab = AppTab.LIVE) }
                 while (isActive) {
                     val chunk = withContext(Dispatchers.IO) {
                         mutex.withLock {
@@ -492,7 +411,10 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                         if (sniffFrames.size > 2000) {
                             sniffFrames.subList(0, sniffFrames.size - 2000).clear()
                         }
-                        _state.update { it.copy(frames = sniffFrames.takeLast(80)) }
+                        if (capturingAnalyze) {
+                            analyzeCapture += chunk
+                        }
+                        publishFrames()
                     }
                     delay(50)
                 }
@@ -502,6 +424,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     mutex.withLock { runCatching { session?.stopCanSniff() } }
                 }
+                capturingAnalyze = false
                 _state.update { it.copy(sniffing = false, busy = null) }
             }
         }
@@ -520,6 +443,8 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         pressSequenceJob = viewModelScope.launch {
             val stages = mutableListOf<CaptureStage>()
             val total = PRESS_STAGE_DEFS.size
+            analyzeCapture.clear()
+            capturingAnalyze = true
             try {
                 for ((index, def) in PRESS_STAGE_DEFS.withIndex()) {
                     val (expectedPresses, label) = def
@@ -533,6 +458,8 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                                 totalStages = total,
                             ),
                             candidates = if (index == 0) emptyList() else it.candidates,
+                            analyzeEmpty = false,
+                            analyzeResultsOpen = false,
                         )
                     }
                     var elapsed = 0L
@@ -550,9 +477,18 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     val endMs = System.currentTimeMillis()
                     stages += CaptureStage(expectedPresses, startMs, endMs)
                 }
-                val candidates = correlatePressSequence(sniffFrames.toList(), stages)
-                _state.update { it.copy(candidates = candidates, pressSequence = null) }
+                capturingAnalyze = false
+                val candidates = correlatePressSequence(analyzeCapture.toList(), stages)
+                _state.update {
+                    it.copy(
+                        candidates = candidates,
+                        pressSequence = null,
+                        analyzeEmpty = candidates.isEmpty(),
+                        analyzeResultsOpen = candidates.isNotEmpty(),
+                    )
+                }
             } finally {
+                capturingAnalyze = false
                 if (_state.value.pressSequence != null) {
                     _state.update { it.copy(pressSequence = null) }
                 }
@@ -563,7 +499,25 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelPressSequence() {
         pressSequenceJob?.cancel()
         pressSequenceJob = null
+        capturingAnalyze = false
         _state.update { it.copy(pressSequence = null) }
+    }
+
+    private fun parseFrameIdFilter(text: String): Int? {
+        val t = text.trim().removePrefix("0x").removePrefix("0X")
+        if (t.isEmpty()) return null
+        return t.toIntOrNull(16)
+    }
+
+    private fun publishFrames() {
+        val filter = parseFrameIdFilter(_state.value.frameIdFilter)
+        val filtered = if (filter == null) sniffFrames else sniffFrames.filter { it.id == filter }
+        _state.update {
+            it.copy(
+                frames = filtered.takeLast(80),
+                framesTotal = sniffFrames.size,
+            )
+        }
     }
 
     fun didSweep(moduleId: String, fromDid: Int, toDid: Int) {
@@ -627,7 +581,6 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         }
         _state.update {
             it.copy(
-                liveRunning = false,
                 sniffing = false,
                 discoverProgress = null,
                 busy = null,
@@ -641,8 +594,6 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun stopBackgroundJobs() {
         cancelPressSequence()
-        liveJob?.cancel()
-        liveJob = null
         sniffJob?.cancel()
         sniffJob = null
     }
@@ -656,10 +607,8 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     private fun stopBackgroundLocked() {
         cancelFlag.set(true)
         cancelPressSequence()
-        liveJob?.cancel()
         sniffJob?.cancel()
         longJob?.cancel()
-        liveJob = null
         sniffJob = null
         longJob = null
         runCatching { session?.stopCanSniff() }

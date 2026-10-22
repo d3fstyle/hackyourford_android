@@ -73,16 +73,17 @@ fun parseMonitorLine(line: String, tsMs: Long): CanFrame? {
     return CanFrame(tsMs, id, data.toByteArray(), trimmed)
 }
 
-/** Split a monitor buffer into frames. */
-fun parseMonitorBuffer(buf: String, baseTsMs: Long): List<CanFrame> {
+/**
+ * Split a monitor buffer into frames.
+ * Each line is stamped with the real wall-clock time at parse (arrival),
+ * not a synthetic baseTs+index offset that drifts past stage windows.
+ */
+fun parseMonitorBuffer(buf: String, @Suppress("UNUSED_PARAMETER") baseTsMs: Long): List<CanFrame> {
     val normalized = buf.replace("\r\n", "\n").replace('\r', '\n')
     val frames = mutableListOf<CanFrame>()
-    var offset = 0L
     for (line in normalized.lineSequence()) {
-        parseMonitorLine(line, baseTsMs + offset)?.let {
-            frames += it
-            offset++
-        }
+        val ts = System.currentTimeMillis()
+        parseMonitorLine(line, ts)?.let { frames += it }
     }
     return frames
 }
