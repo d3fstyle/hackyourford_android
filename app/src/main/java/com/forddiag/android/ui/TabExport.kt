@@ -35,6 +35,9 @@ fun tabExportAvailable(tab: AppTab, state: UiState): Boolean = when (tab) {
             state.didDiffs.isNotEmpty()
     AppTab.DTCS -> state.dtcGroups.isNotEmpty()
     AppTab.LIVE -> state.frames.isNotEmpty() || state.candidates.isNotEmpty()
+    AppTab.OBD ->
+        state.obdPendingCsv != null ||
+            state.obdSignals.any { it.lastValue != null || it.lastText != null }
 }
 
 fun buildTabExport(tab: AppTab, state: UiState): TabExportPayload = when (tab) {
@@ -43,7 +46,16 @@ fun buildTabExport(tab: AppTab, state: UiState): TabExportPayload = when (tab) {
     AppTab.ECUS -> exportEcus(state)
     AppTab.DTCS -> exportDtcs(state.dtcGroups)
     AppTab.LIVE -> exportLiveSniff(state)
+    AppTab.OBD -> exportObd(state)
 }
+
+/** Build a wide CSV from recorded OBD poll rows (timestamp + signal columns). */
+fun buildObdRecordCsv(headers: List<String>, rows: List<List<String>>): String = buildString {
+    appendLine(csvRow(*headers.toTypedArray()))
+    rows.forEach { row ->
+        appendLine(csvRow(*row.toTypedArray()))
+    }
+}.trimEnd()
 
 fun exportCandidatePayload(c: PatternCandidate): TabExportPayload {
     val idHex = "0x%03X".format(c.canId)
@@ -451,4 +463,50 @@ private fun exportLiveSniff(state: UiState): TabExportPayload {
         }
     }
     return TabExportPayload(plain, csv.trimEnd(), "forddiag-live")
+}
+
+private fun exportObd(state: UiState): TabExportPayload {
+    state.obdPendingCsv?.let { csv ->
+        return TabExportPayload(csv, csv, "forddiag-obd-live")
+    }
+    val withData = state.obdSignals.filter { it.lastValue != null || !it.lastText.isNullOrBlank() }
+    val plain = buildString {
+        appendLine("OBD signals (${withData.size})")
+        withData.forEach { row ->
+            val id = when (row.key.source) {
+                com.forddiag.android.core.LiveSource.PID -> "PID %02X".format(row.key.id)
+                com.forddiag.android.core.LiveSource.DID ->
+                    "DID 0x%04X%s".format(
+                        row.key.id,
+                        row.key.moduleId?.let { " @$it" } ?: "",
+                    )
+            }
+            val value = row.lastText
+                ?: row.lastValue?.let { v ->
+                    if (row.unit != null) "%.2f %s".format(v, row.unit) else "%.2f".format(v)
+                }
+                ?: "—"
+            appendLine("$id  ${row.label}: $value")
+        }
+    }.trimEnd()
+    val csv = buildString {
+        appendLine(csvRow("source", "id", "module", "label", "unit", "value", "text"))
+        withData.forEach { row ->
+            appendLine(
+                csvRow(
+                    row.key.source.name,
+                    when (row.key.source) {
+                        com.forddiag.android.core.LiveSource.PID -> "%02X".format(row.key.id)
+                        com.forddiag.android.core.LiveSource.DID -> "0x%04X".format(row.key.id)
+                    },
+                    row.key.moduleId.orEmpty(),
+                    row.label,
+                    row.unit.orEmpty(),
+                    row.lastValue?.toString().orEmpty(),
+                    row.lastText.orEmpty(),
+                ),
+            )
+        }
+    }.trimEnd()
+    return TabExportPayload(plain, csv, "forddiag-obd")
 }

@@ -310,9 +310,11 @@ class ScannerSession(
                         source = LiveSource.PID,
                         id = pid,
                         rawHex = s.hex,
-                        decoded = s.decoded,
+                        decoded = s.decoded ?: s.hex,
                         moduleId = "PCM",
-                        label = "PID %02X".format(pid),
+                        label = s.label ?: pidLabel(pid) ?: "PID %02X".format(pid),
+                        value = s.value,
+                        unit = s.unit,
                     )
                 }
                 .onFailure { lastErr = it.message ?: it.toString() }
@@ -329,14 +331,20 @@ class ScannerSession(
                 }
             }
                 .onSuccess { v ->
+                    val numeric = rawNumericDid(v.data)
+                    val display = v.ascii?.takeIf { it.isNotBlank() }
+                        ?: numeric?.let { "%.0f".format(it) }
+                        ?: v.hex
                     samples += LiveSample(
                         tsMs = tsMs,
                         source = LiveSource.DID,
                         id = pin.did,
                         rawHex = v.hex,
-                        decoded = v.ascii,
+                        decoded = display,
                         moduleId = pin.moduleId,
-                        label = pin.label,
+                        label = pin.label ?: "DID 0x%04X".format(pin.did),
+                        value = numeric,
+                        unit = null,
                     )
                 }
                 .onFailure { lastErr = it.message ?: it.toString() }

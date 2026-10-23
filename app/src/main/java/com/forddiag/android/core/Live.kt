@@ -10,6 +10,8 @@ data class LiveSample(
     val decoded: String?,
     val moduleId: String?,
     val label: String?,
+    val value: Double? = null,
+    val unit: String? = null,
 )
 
 data class LiveSessionFile(

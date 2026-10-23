@@ -83,25 +83,29 @@ private val TABS = listOf(
     TabDef(AppTab.ECUS, "ECUs", true),
     TabDef(AppTab.DTCS, "DTCs", true),
     TabDef(AppTab.LIVE, "Live", true),
+    TabDef(AppTab.OBD, "OBD", true),
 )
 
 @Composable
 fun FordDiagApp(viewModel: FordDiagViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val connected = state.status != null
+    val obdFullscreen = state.tab == AppTab.OBD && state.obdMode != ObdUiMode.LIST
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BgDeep),
     ) {
-        Header(connected = connected, identity = state.status?.adapter?.identity)
+        if (!obdFullscreen) {
+            Header(connected = connected, identity = state.status?.adapter?.identity)
 
-        TabBar(
-            tab = state.tab,
-            connected = connected,
-            onSelect = viewModel::selectTab,
-        )
+            TabBar(
+                tab = state.tab,
+                connected = connected,
+                onSelect = viewModel::selectTab,
+            )
+        }
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when (state.tab) {
@@ -157,10 +161,24 @@ fun FordDiagApp(viewModel: FordDiagViewModel) {
                         onDismissAnalyzeResults = viewModel::dismissAnalyzeResults,
                     )
                 }
+                AppTab.OBD -> if (connected) {
+                    ObdScreen(
+                        state = state,
+                        onRefresh = viewModel::refreshObdCatalog,
+                        onToggleRecord = viewModel::setObdRecordEnabled,
+                        onToggleSignal = viewModel::toggleObdSignal,
+                        onStartGauges = viewModel::startObdGauges,
+                        onStartChart = viewModel::startObdChart,
+                        onCloseFullscreen = viewModel::stopObdFullscreen,
+                        onConsumePendingCsv = viewModel::consumeObdPendingCsv,
+                    )
+                }
             }
         }
 
-        Footer(busy = state.busy, error = state.error)
+        if (!obdFullscreen) {
+            Footer(busy = state.busy, error = state.error)
+        }
     }
 }
 

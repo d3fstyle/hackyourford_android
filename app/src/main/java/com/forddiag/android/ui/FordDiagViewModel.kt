@@ -16,6 +16,7 @@ import com.forddiag.android.core.DidValue
 import com.forddiag.android.core.DtcCatalog
 import com.forddiag.android.core.EcuDiscoverProgress
 import com.forddiag.android.core.LiveDidPin
+import com.forddiag.android.core.LiveSource
 import com.forddiag.android.core.ModuleDef
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
@@ -28,6 +29,7 @@ import com.forddiag.android.core.VehicleProfile
 import com.forddiag.android.core.correlatePressSequence
 import com.forddiag.android.core.diffDidSnapshots
 import com.forddiag.android.core.listBondedObdDevices
+import com.forddiag.android.core.pidLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -42,7 +44,27 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 
-enum class AppTab { HOME, PROFILES, ECUS, DTCS, LIVE }
+enum class AppTab { HOME, PROFILES, ECUS, DTCS, LIVE, OBD }
+
+enum class ObdUiMode { LIST, GAUGES, CHART }
+
+data class ObdSignalId(
+    val source: LiveSource,
+    val id: Int,
+    val moduleId: String? = null,
+)
+
+data class ObdSignalRow(
+    val key: ObdSignalId,
+    val label: String,
+    val unit: String?,
+    val selected: Boolean = false,
+    val lastValue: Double? = null,
+    val lastText: String? = null,
+    val chartable: Boolean = false,
+)
+
+data class ObdChartPoint(val tsMs: Long, val value: Double)
 
 data class UiState(
     val tab: AppTab = AppTab.HOME,
@@ -77,6 +99,15 @@ data class UiState(
     val analyzeResultsOpen: Boolean = false,
     val sweptDids: List<DidValue> = emptyList(),
     val didDiffs: List<Triple<Int, String, String>> = emptyList(),
+    val obdMode: ObdUiMode = ObdUiMode.LIST,
+    val obdSignals: List<ObdSignalRow> = emptyList(),
+    val obdRecordEnabled: Boolean = false,
+    val obdPolling: Boolean = false,
+    val obdChartKey: ObdSignalId? = null,
+    val obdChartPoints: List<ObdChartPoint> = emptyList(),
+    /** CSV content ready to share after closing a recorded gauges session. */
+    val obdPendingCsv: String? = null,
+    val obdCatalogLoaded: Boolean = false,
     val busy: String? = null,
     val error: String? = null,
 )
@@ -99,10 +130,18 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     /** Frames captured only while Analyze is running (not ring-trimmed). */
     private val analyzeCapture = mutableListOf<CanFrame>()
     private var capturingAnalyze = false
+    private var obdPollJob: Job? = null
+    private var obdRecording = false
+    private val obdRecordHeaders = mutableListOf<String>()
+    private val obdRecordKeys = mutableListOf<ObdSignalId>()
+    private val obdRecordRows = mutableListOf<List<String>>()
+    private val obdChartBuffer = mutableListOf<ObdChartPoint>()
 
     companion object {
         const val PRESS_STAGE_MS = 5_000L
         private const val PRESS_TICK_MS = 50L
+        private const val OBD_POLL_DELAY_MS = 120L
+        private const val OBD_CHART_MAX_POINTS = 120
 
         private val PRESS_STAGE_DEFS = listOf(
             0 to "No pulses. Espera…",
@@ -122,6 +161,9 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         val needsConn = tab != AppTab.HOME && tab != AppTab.PROFILES
         if (needsConn && _state.value.status == null) return
         _state.update { it.copy(tab = tab) }
+        if (tab == AppTab.OBD && _state.value.status != null) {
+            refreshObdCatalog()
+        }
     }
 
     fun isBuiltInProfile(id: String): Boolean = ProfileRepository.isBuiltIn(id)
@@ -356,8 +398,138 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pinDid(moduleId: String, did: Int) {
         if (pinnedDids.none { it.moduleId == moduleId && it.did == did }) {
-            pinnedDids += LiveDidPin(moduleId, did, "0x%04X".format(did))
+            val label = profileDidLabel(moduleId, did) ?: "DID 0x%04X".format(did)
+            pinnedDids += LiveDidPin(moduleId, did, label)
+            mergeObdDidSignal(moduleId, did, label)
         }
+    }
+
+    fun setObdRecordEnabled(enabled: Boolean) {
+        _state.update { it.copy(obdRecordEnabled = enabled) }
+    }
+
+    fun toggleObdSignal(key: ObdSignalId) {
+        _state.update { st ->
+            st.copy(
+                obdSignals = st.obdSignals.map { row ->
+                    if (row.key == key) row.copy(selected = !row.selected) else row
+                },
+            )
+        }
+    }
+
+    fun refreshObdCatalog() {
+        if (_state.value.status == null) return
+        viewModelScope.launch {
+            _state.update { it.copy(busy = "Listing OBD signals…", error = null) }
+            try {
+                val supportedPids = withContext(Dispatchers.IO) {
+                    mutex.withLock {
+                        session?.listSupportedObdPids().orEmpty()
+                    }
+                }
+                val selected = _state.value.obdSignals.filter { it.selected }.map { it.key }.toSet()
+                val rows = buildObdCatalogRows(supportedPids, selected)
+                _state.update {
+                    it.copy(
+                        obdSignals = rows,
+                        obdCatalogLoaded = true,
+                        busy = null,
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        error = e.message ?: e.toString(),
+                        busy = null,
+                        obdCatalogLoaded = true,
+                    )
+                }
+            }
+        }
+    }
+
+    fun startObdGauges() {
+        val selected = _state.value.obdSignals.filter { it.selected }
+        if (selected.isEmpty()) {
+            _state.update { it.copy(error = "Select at least one signal") }
+            return
+        }
+        val record = _state.value.obdRecordEnabled
+        stopBackgroundJobs()
+        obdRecording = record
+        obdRecordHeaders.clear()
+        obdRecordKeys.clear()
+        obdRecordRows.clear()
+        if (record) {
+            obdRecordHeaders += "timestamp"
+            selected.forEach { row ->
+                obdRecordKeys += row.key
+                val col = signalColumnName(row)
+                obdRecordHeaders += col
+            }
+        }
+        _state.update {
+            it.copy(
+                obdMode = ObdUiMode.GAUGES,
+                obdChartKey = null,
+                obdChartPoints = emptyList(),
+                obdPendingCsv = null,
+                error = null,
+            )
+        }
+        startObdPoll(selected.map { it.key }, chartOnly = false)
+    }
+
+    fun startObdChart(key: ObdSignalId) {
+        val row = _state.value.obdSignals.find { it.key == key } ?: return
+        if (!row.chartable && row.lastValue == null) {
+            // Allow start; poll may still produce numeric values for short DIDs.
+        }
+        stopBackgroundJobs()
+        obdRecording = false
+        obdChartBuffer.clear()
+        _state.update {
+            it.copy(
+                obdMode = ObdUiMode.CHART,
+                obdChartKey = key,
+                obdChartPoints = emptyList(),
+                obdPendingCsv = null,
+                error = null,
+            )
+        }
+        startObdPoll(listOf(key), chartOnly = true)
+    }
+
+    /**
+     * Exit gauges/chart fullscreen. If gauges were recording, builds CSV into [UiState.obdPendingCsv].
+     */
+    fun stopObdFullscreen() {
+        val wasRecording = obdRecording && obdRecordRows.isNotEmpty()
+        val csv = if (wasRecording) {
+            buildObdRecordCsv(obdRecordHeaders.toList(), obdRecordRows.toList())
+        } else {
+            null
+        }
+        stopObdPoll()
+        obdRecording = false
+        obdRecordHeaders.clear()
+        obdRecordKeys.clear()
+        obdRecordRows.clear()
+        obdChartBuffer.clear()
+        _state.update {
+            it.copy(
+                obdMode = ObdUiMode.LIST,
+                obdPolling = false,
+                obdChartKey = null,
+                obdChartPoints = emptyList(),
+                obdPendingCsv = csv,
+            )
+        }
+    }
+
+    fun consumeObdPendingCsv() {
+        _state.update { it.copy(obdPendingCsv = null) }
     }
 
     fun setFrameIdFilter(text: String) {
@@ -582,6 +754,10 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 sniffing = false,
+                obdPolling = false,
+                obdMode = ObdUiMode.LIST,
+                obdChartKey = null,
+                obdChartPoints = emptyList(),
                 discoverProgress = null,
                 busy = null,
             )
@@ -592,10 +768,214 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(error = null) }
     }
 
+    private fun startObdPoll(keys: List<ObdSignalId>, chartOnly: Boolean) {
+        stopObdPoll()
+        val pids = keys.filter { it.source == LiveSource.PID }.map { it.id }
+        val didPins = keys.filter { it.source == LiveSource.DID }.mapNotNull { key ->
+            val moduleId = key.moduleId ?: return@mapNotNull null
+            val label = _state.value.obdSignals.find { it.key == key }?.label
+                ?: pinnedDids.find { it.moduleId == moduleId && it.did == key.id }?.label
+            LiveDidPin(moduleId, key.id, label)
+        }
+        obdPollJob = viewModelScope.launch {
+            _state.update { it.copy(obdPolling = true, busy = null) }
+            try {
+                while (isActive) {
+                    val samples = withContext(Dispatchers.IO) {
+                        mutex.withLock {
+                            session?.pollLiveOnce(pids, didPins).orEmpty()
+                        }
+                    }
+                    applyObdSamples(samples, keys, chartOnly)
+                    delay(OBD_POLL_DELAY_MS)
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        error = e.message ?: e.toString(),
+                        obdPolling = false,
+                    )
+                }
+            } finally {
+                _state.update { it.copy(obdPolling = false) }
+            }
+        }
+    }
+
+    private fun applyObdSamples(
+        samples: List<com.forddiag.android.core.LiveSample>,
+        keys: List<ObdSignalId>,
+        chartOnly: Boolean,
+    ) {
+        val byKey = samples.associateBy { s ->
+            ObdSignalId(s.source, s.id, s.moduleId)
+        }
+        val ts = samples.firstOrNull()?.tsMs ?: System.currentTimeMillis()
+
+        if (obdRecording && !chartOnly) {
+            val row = mutableListOf(ts.toString())
+            for (key in obdRecordKeys) {
+                val s = byKey[key]
+                val cell = s?.value?.let { formatObdNumber(it) }
+                    ?: s?.decoded
+                    ?: ""
+                row += cell
+            }
+            obdRecordRows += row
+        }
+
+        if (chartOnly) {
+            val key = keys.firstOrNull()
+            val sample = key?.let { byKey[it] }
+            val value = sample?.value
+            if (value != null) {
+                obdChartBuffer += ObdChartPoint(ts, value)
+                if (obdChartBuffer.size > OBD_CHART_MAX_POINTS) {
+                    obdChartBuffer.subList(0, obdChartBuffer.size - OBD_CHART_MAX_POINTS).clear()
+                }
+            }
+        }
+
+        _state.update { st ->
+            val updated = st.obdSignals.map { row ->
+                val s = byKey[row.key] ?: return@map row
+                row.copy(
+                    lastValue = s.value ?: row.lastValue,
+                    lastText = s.decoded ?: s.rawHex,
+                    unit = s.unit ?: row.unit,
+                    label = s.label ?: row.label,
+                    chartable = (s.value != null) || row.chartable,
+                )
+            }
+            st.copy(
+                obdSignals = updated,
+                obdChartPoints = if (chartOnly) obdChartBuffer.toList() else st.obdChartPoints,
+            )
+        }
+    }
+
+    private fun stopObdPoll() {
+        obdPollJob?.cancel()
+        obdPollJob = null
+    }
+
+    private fun buildObdCatalogRows(
+        supportedPids: List<Int>,
+        selected: Set<ObdSignalId>,
+    ): List<ObdSignalRow> {
+        val existing = _state.value.obdSignals.associateBy { it.key }
+        val rows = linkedMapOf<ObdSignalId, ObdSignalRow>()
+
+        for (pid in supportedPids.sorted()) {
+            val key = ObdSignalId(LiveSource.PID, pid, null)
+            val prev = existing[key]
+            rows[key] = ObdSignalRow(
+                key = key,
+                label = pidLabel(pid) ?: prev?.label ?: "PID %02X".format(pid),
+                unit = prev?.unit,
+                selected = key in selected || prev?.selected == true,
+                lastValue = prev?.lastValue,
+                lastText = prev?.lastText,
+                chartable = prev?.chartable == true || pidLabel(pid) != null,
+            )
+        }
+
+        val profile = _state.value.selectedProfileId?.let { id ->
+            _state.value.profiles.find { it.id == id }
+        }
+        profile?.modules?.forEach { mod ->
+            mod.dids.filter { !it.asBuilt }.forEach { def ->
+                addDidRow(rows, existing, selected, mod.id, def.did, def.label)
+            }
+            // Also include as-built DIDs with labels so "todo lo que se pueda" is covered,
+            // but after live DIDs so they don't dominate the list order.
+            mod.dids.filter { it.asBuilt }.forEach { def ->
+                addDidRow(rows, existing, selected, mod.id, def.did, def.label)
+            }
+        }
+
+        pinnedDids.forEach { pin ->
+            addDidRow(
+                rows,
+                existing,
+                selected,
+                pin.moduleId,
+                pin.did,
+                pin.label ?: "DID 0x%04X".format(pin.did),
+            )
+        }
+
+        val sweepModule = _state.value.selectedModuleId
+        if (sweepModule != null) {
+            _state.value.sweptDids.forEach { did ->
+                val label = profileDidLabel(sweepModule, did.did)
+                    ?: "DID 0x%04X".format(did.did)
+                addDidRow(rows, existing, selected, sweepModule, did.did, label)
+            }
+        }
+
+        return rows.values.toList()
+    }
+
+    private fun addDidRow(
+        rows: MutableMap<ObdSignalId, ObdSignalRow>,
+        existing: Map<ObdSignalId, ObdSignalRow>,
+        selected: Set<ObdSignalId>,
+        moduleId: String,
+        did: Int,
+        label: String,
+    ) {
+        val key = ObdSignalId(LiveSource.DID, did, moduleId)
+        if (rows.containsKey(key)) return
+        val prev = existing[key]
+        rows[key] = ObdSignalRow(
+            key = key,
+            label = "$label ($moduleId)",
+            unit = prev?.unit,
+            selected = key in selected || prev?.selected == true,
+            lastValue = prev?.lastValue,
+            lastText = prev?.lastText,
+            chartable = prev?.chartable == true,
+        )
+    }
+
+    private fun mergeObdDidSignal(moduleId: String, did: Int, label: String) {
+        val key = ObdSignalId(LiveSource.DID, did, moduleId)
+        _state.update { st ->
+            if (st.obdSignals.any { it.key == key }) return@update st
+            st.copy(
+                obdSignals = st.obdSignals + ObdSignalRow(
+                    key = key,
+                    label = "$label ($moduleId)",
+                    unit = null,
+                    selected = false,
+                    chartable = false,
+                ),
+            )
+        }
+    }
+
+    private fun profileDidLabel(moduleId: String, did: Int): String? {
+        val profile = _state.value.selectedProfileId?.let { id ->
+            _state.value.profiles.find { it.id == id }
+        } ?: return null
+        return profile.module(moduleId)?.dids?.find { it.did == did }?.label
+    }
+
+    private fun signalColumnName(row: ObdSignalRow): String {
+        val base = row.label.replace(';', ',').replace('\n', ' ')
+        return if (row.unit.isNullOrBlank()) base else "$base (${row.unit})"
+    }
+
+    private fun formatObdNumber(v: Double): String =
+        if (v == v.toLong().toDouble()) "%.0f".format(v) else "%.2f".format(v)
+
     private fun stopBackgroundJobs() {
         cancelPressSequence()
         sniffJob?.cancel()
         sniffJob = null
+        stopObdPoll()
+        obdRecording = false
     }
 
     private fun stopLongJob() {
@@ -609,8 +989,10 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         cancelPressSequence()
         sniffJob?.cancel()
         longJob?.cancel()
+        stopObdPoll()
         sniffJob = null
         longJob = null
+        obdRecording = false
         runCatching { session?.stopCanSniff() }
     }
 
