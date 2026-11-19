@@ -35,6 +35,19 @@ data class PressSequenceUi(
     val totalStages: Int = 4,
 )
 
+/**
+ * True when ELM/STN ended ATMA (buffer full or stopped).
+ * Torque re-issues ATMA when it sees these; silence follows if we do not.
+ */
+fun monitorOutputEnded(text: String): Boolean {
+    if (text.isEmpty()) return false
+    val up = text.uppercase()
+    return up.contains("BUFFER FULL") ||
+        up.contains("STOPPED") ||
+        // ELM also prints bare "FULL" on some firmwares
+        Regex("""(^|[^A-Z])FULL([^A-Z]|$)""").containsMatchIn(up)
+}
+
 /** Parse one ELM monitor line into a frame (headers on). */
 fun parseMonitorLine(line: String, tsMs: Long): CanFrame? {
     val trimmed = line.trim().trimEnd('>')
@@ -88,8 +101,9 @@ fun parseMonitorBuffer(buf: String, @Suppress("UNUSED_PARAMETER") baseTsMs: Long
     return frames
 }
 
-private const val BASELINE_NOISE_CHANGES = 3
-private const val SEQUENCE_SCORE_THRESHOLD = 0.5
+private const val SEQUENCE_SCORE_THRESHOLD = 0.4
+private const val BASELINE_FRAME_NOISE_RATIO = 0.15
+private val EXPECTED_PRESS_RANKS = listOf(1.0, 2.0, 3.0)
 
 /** Score IDs/bytes whose changes cluster inside press windows more than outside. */
 fun correlatePressPattern(
@@ -159,8 +173,9 @@ fun correlatePressPattern(
 }
 
 /**
- * Score IDs/bytes whose change counts across guided stages match expected press counts.
+ * Score IDs/bytes/bits whose change counts across guided stages rise with press counts.
  * Stage 0 (expectedPresses == 0) is the idle baseline used to reject periodic noise.
+ * Bits are scored independently so a quiet button bit survives inside a noisy byte.
  */
 fun correlatePressSequence(
     frames: List<CanFrame>,
@@ -172,15 +187,23 @@ fun correlatePressSequence(
     val pressStages = stages.filter { it.expectedPresses > 0 }.sortedBy { it.expectedPresses }
     if (pressStages.isEmpty()) return emptyList()
 
+    val baselineIdx = stages.indexOf(baseline)
+    val pressIdx = pressStages.map { stages.indexOf(it) }
+    val expectedRanks = pressStages.map { it.expectedPresses.toDouble() }.ifEmpty { EXPECTED_PRESS_RANKS }
+
     val byId = frames.groupBy { it.id }
     val candidates = mutableListOf<PatternCandidate>()
 
     for ((canId, list) in byId) {
         if (list.size < 2) continue
+        val baselineFrames = list.count { it.tsMs in baseline.startMs..baseline.endMs }
         val maxLen = list.maxOf { it.data.size }
+
         for (byteI in 0 until maxLen) {
-            val stageCounts = IntArray(stages.size)
+            val byteCounts = IntArray(stages.size)
+            val bitCounts = Array(8) { IntArray(stages.size) }
             val stageSamples = List(stages.size) { mutableListOf<String>() }
+
             for (w in list.windowed(2)) {
                 val a = w[0].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
                 val b = w[1].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
@@ -188,61 +211,40 @@ fun correlatePressSequence(
                 val ts = w[1].tsMs
                 val stageIdx = stages.indexOfFirst { ts in it.startMs..it.endMs }
                 if (stageIdx < 0) continue
-                stageCounts[stageIdx]++
+                byteCounts[stageIdx]++
                 if (stageSamples[stageIdx].size < 4) {
                     stageSamples[stageIdx] += "s${stageIdx}:%02X->%02X".format(a, b)
                 }
+                val flipped = a xor b
+                for (bit in 0 until 8) {
+                    if ((flipped shr bit) and 1 != 0) bitCounts[bit][stageIdx]++
+                }
             }
-
-            val baselineIdx = stages.indexOf(baseline)
-            val c0 = stageCounts.getOrElse(baselineIdx) { 0 }
-            if (c0 >= BASELINE_NOISE_CHANGES) continue
-
-            val observed = pressStages.map { stage ->
-                val idx = stages.indexOf(stage)
-                stageCounts.getOrElse(idx) { 0 }.toDouble()
-            }
-            if (observed.all { it == 0.0 }) continue
-
-            var bestScore = 0.0
-            for (k in 1..2) {
-                val expected = pressStages.map { (it.expectedPresses * k).toDouble() }
-                val sim = sequenceSimilarity(observed, expected)
-                val penalty = 1.0 - (c0.toDouble() / BASELINE_NOISE_CHANGES)
-                val score = sim * penalty.coerceAtLeast(0.0)
-                if (score > bestScore) bestScore = score
-            }
-            if (bestScore < SEQUENCE_SCORE_THRESHOLD) continue
 
             var bestBit: Pair<Int, Double>? = null
             for (bit in 0 until 8) {
-                val mask = 1 shl bit
-                val bitCounts = IntArray(stages.size)
-                for (w in list.windowed(2)) {
-                    val a = w[0].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
-                    val b = w[1].data.getOrNull(byteI)?.toInt()?.and(0xFF) ?: continue
-                    if ((a xor b) and mask == 0) continue
-                    val ts = w[1].tsMs
-                    val stageIdx = stages.indexOfFirst { ts in it.startMs..it.endMs }
-                    if (stageIdx >= 0) bitCounts[stageIdx]++
-                }
-                val bitC0 = bitCounts.getOrElse(baselineIdx) { 0 }
-                if (bitC0 >= BASELINE_NOISE_CHANGES) continue
-                val bitObs = pressStages.map { stage ->
-                    bitCounts.getOrElse(stages.indexOf(stage)) { 0 }.toDouble()
-                }
-                if (bitObs.all { it == 0.0 }) continue
-                var bitBest = 0.0
-                for (k in 1..2) {
-                    val expected = pressStages.map { (it.expectedPresses * k).toDouble() }
-                    val sim = sequenceSimilarity(bitObs, expected)
-                    val penalty = 1.0 - (bitC0.toDouble() / BASELINE_NOISE_CHANGES)
-                    bitBest = maxOf(bitBest, sim * penalty.coerceAtLeast(0.0))
-                }
-                if (bestBit == null || bitBest > bestBit.second) {
-                    bestBit = bit to bitBest
+                val counts = bitCounts[bit]
+                val c0 = counts.getOrElse(baselineIdx) { 0 }
+                val observed = pressIdx.map { counts.getOrElse(it) { 0 }.toDouble() }
+                if (!passesBaseline(c0, observed, baselineFrames)) continue
+                val score = scoreSequenceChanges(observed, expectedRanks, c0, baselineFrames)
+                if (score < SEQUENCE_SCORE_THRESHOLD) continue
+                if (bestBit == null || score > bestBit.second) {
+                    bestBit = bit to score
                 }
             }
+
+            val byteC0 = byteCounts.getOrElse(baselineIdx) { 0 }
+            val byteObs = pressIdx.map { byteCounts.getOrElse(it) { 0 }.toDouble() }
+            val byteScore = if (passesBaseline(byteC0, byteObs, baselineFrames)) {
+                scoreSequenceChanges(byteObs, expectedRanks, byteC0, baselineFrames)
+            } else {
+                0.0
+            }
+
+            val bitScore = bestBit?.second ?: 0.0
+            val bestScore = maxOf(byteScore, bitScore)
+            if (bestScore < SEQUENCE_SCORE_THRESHOLD) continue
 
             candidates += PatternCandidate(
                 canId = canId,
@@ -255,6 +257,74 @@ fun correlatePressSequence(
     }
 
     return candidates.sortedByDescending { it.changeScore }.take(40)
+}
+
+/**
+ * Baseline is too noisy when idle changes rival press activity or exceed a share of
+ * baseline frames (covers periodic counters without killing quiet button bits).
+ */
+internal fun passesBaseline(
+    baselineChanges: Int,
+    pressObserved: List<Double>,
+    baselineFrameCount: Int,
+): Boolean {
+    if (pressObserved.isEmpty() || pressObserved.all { it == 0.0 }) return false
+    if (pressObserved.first() <= 0.0) return false
+    val noiseCeiling = maxOf(3, (BASELINE_FRAME_NOISE_RATIO * baselineFrameCount).toInt())
+    if (baselineChanges >= noiseCeiling) return false
+    val minPress = pressObserved.minOrNull() ?: return false
+    if (minPress > 0.0 && baselineChanges >= minPress) return false
+    return true
+}
+
+/**
+ * Primary score: Pearson correlation of observed press-stage counts vs expected ranks
+ * (monotonicity). Exact-count similarity with k=1..6 is a small tie-break bonus.
+ */
+internal fun scoreSequenceChanges(
+    observed: List<Double>,
+    expectedRanks: List<Double>,
+    baselineChanges: Int,
+    baselineFrameCount: Int,
+): Double {
+    if (observed.size != expectedRanks.size || observed.isEmpty()) return 0.0
+    if (observed.first() <= 0.0) return 0.0
+
+    val mono = pearsonCorrelation(observed, expectedRanks).coerceIn(0.0, 1.0)
+    if (mono < SEQUENCE_SCORE_THRESHOLD) return mono
+
+    var exactBest = 0.0
+    for (k in 1..6) {
+        val expected = expectedRanks.map { it * k }
+        exactBest = maxOf(exactBest, sequenceSimilarity(observed, expected))
+    }
+    val noiseCeiling = maxOf(3, (BASELINE_FRAME_NOISE_RATIO * baselineFrameCount).toInt()).toDouble()
+    val penalty = (1.0 - baselineChanges.toDouble() / noiseCeiling).coerceIn(0.0, 1.0)
+    // Weight monotonic gate heavily; exact match only breaks ties.
+    return (0.85 * mono + 0.15 * exactBest) * penalty
+}
+
+/** Pearson correlation clamped to [0, 1] (negative correlations → 0). */
+internal fun pearsonCorrelation(xs: List<Double>, ys: List<Double>): Double {
+    if (xs.size != ys.size || xs.size < 2) return 0.0
+    val n = xs.size.toDouble()
+    val meanX = xs.sum() / n
+    val meanY = ys.sum() / n
+    var num = 0.0
+    var denX = 0.0
+    var denY = 0.0
+    for (i in xs.indices) {
+        val dx = xs[i] - meanX
+        val dy = ys[i] - meanY
+        num += dx * dy
+        denX += dx * dx
+        denY += dy * dy
+    }
+    if (denX <= 0.0 || denY <= 0.0) {
+        // Constant series: treat perfect proportional match as 1 when all positive & ordered.
+        return if (xs == ys) 1.0 else 0.0
+    }
+    return (num / kotlin.math.sqrt(denX * denY)).coerceIn(0.0, 1.0)
 }
 
 /** Mean relative similarity of observed change counts to an expected sequence. */

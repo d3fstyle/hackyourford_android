@@ -4,23 +4,31 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.forddiag.android.core.AppPreferences
 import com.forddiag.android.core.AsBuiltDump
 import com.forddiag.android.core.AsBuiltParser
 import com.forddiag.android.core.BtDeviceInfo
 import com.forddiag.android.core.CanBus
 import com.forddiag.android.core.CanFrame
 import com.forddiag.android.core.ConnectionStatus
+import com.forddiag.android.core.CaptureStage
 import com.forddiag.android.core.DidDef
-import com.forddiag.android.core.DiscoveredEcu
 import com.forddiag.android.core.DidValue
+import com.forddiag.android.core.DiscoveredEcu
 import com.forddiag.android.core.DtcCatalog
 import com.forddiag.android.core.EcuDiscoverProgress
+import com.forddiag.android.core.FordExtendedPidCatalog
 import com.forddiag.android.core.LiveDidPin
+import com.forddiag.android.core.LiveSample
 import com.forddiag.android.core.LiveSource
 import com.forddiag.android.core.ModuleDef
 import com.forddiag.android.core.ModuleDtcGroup
 import com.forddiag.android.core.ModuleScanResult
-import com.forddiag.android.core.CaptureStage
+import com.forddiag.android.core.ObdDashboard
+import com.forddiag.android.core.ObdDashboardIds
+import com.forddiag.android.core.ObdDashboardRepository
+import com.forddiag.android.core.ObdDashboardScope
+import com.forddiag.android.core.ObdFavoritePointer
 import com.forddiag.android.core.PatternCandidate
 import com.forddiag.android.core.PressSequenceUi
 import com.forddiag.android.core.ProfileRepository
@@ -28,8 +36,10 @@ import com.forddiag.android.core.ScannerSession
 import com.forddiag.android.core.VehicleProfile
 import com.forddiag.android.core.correlatePressSequence
 import com.forddiag.android.core.diffDidSnapshots
+import com.forddiag.android.core.isLinkLost
 import com.forddiag.android.core.listBondedObdDevices
 import com.forddiag.android.core.pidLabel
+import com.forddiag.android.core.resolveFordExtendedPids
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -54,6 +64,21 @@ data class ObdSignalId(
     val moduleId: String? = null,
 )
 
+/** Map a live sample to the catalog key (PIDs are never module-scoped). */
+fun obdSampleKey(sample: LiveSample): ObdSignalId =
+    ObdSignalId(
+        source = sample.source,
+        id = sample.id,
+        moduleId = if (sample.source == LiveSource.PID) null else sample.moduleId,
+    )
+
+/**
+ * LazyColumn row key for a live CAN frame.
+ * [index] keeps two identical frames parsed in the same millisecond distinct.
+ */
+fun liveFrameRowKey(index: Int, frame: CanFrame): String =
+    "$index:${frame.tsMs}:${frame.id}:${frame.hashCode()}"
+
 data class ObdSignalRow(
     val key: ObdSignalId,
     val label: String,
@@ -62,6 +87,24 @@ data class ObdSignalRow(
     val lastValue: Double? = null,
     val lastText: String? = null,
     val chartable: Boolean = false,
+    /** True when Mode 01 PID appeared in the reference TorqueScan export. */
+    val confirmed: Boolean = false,
+)
+
+data class ObdDashboardSummary(
+    val id: String,
+    val name: String,
+    val scope: ObdDashboardScope,
+    val signalCount: Int,
+    val updatedAtMs: Long,
+)
+
+fun ObdDashboard.toSummary(scope: ObdDashboardScope) = ObdDashboardSummary(
+    id = id,
+    name = name,
+    scope = scope,
+    signalCount = signals.size,
+    updatedAtMs = updatedAtMs,
 )
 
 data class ObdChartPoint(val tsMs: Long, val value: Double)
@@ -108,6 +151,11 @@ data class UiState(
     /** CSV content ready to share after closing a recorded gauges session. */
     val obdPendingCsv: String? = null,
     val obdCatalogLoaded: Boolean = false,
+    val obdDashboardsProfile: List<ObdDashboardSummary> = emptyList(),
+    val obdDashboardsGlobal: List<ObdDashboardSummary> = emptyList(),
+    val obdActiveDashboardId: String? = null,
+    val obdActiveDashboardScope: ObdDashboardScope? = null,
+    val obdFavorite: ObdFavoritePointer? = null,
     val busy: String? = null,
     val error: String? = null,
 )
@@ -126,6 +174,8 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     private var snapshotBefore: Map<Int, String> = emptyMap()
     private var snapshotAfter: Map<Int, String> = emptyMap()
     private val pinnedDids = mutableListOf<LiveDidPin>()
+    /** Equation/unit for Ford extended DIDs keyed like OBD rows. */
+    private var fordDidPins = mapOf<ObdSignalId, LiveDidPin>()
     private val sniffFrames = mutableListOf<CanFrame>()
     /** Frames captured only while Analyze is running (not ring-trimmed). */
     private val analyzeCapture = mutableListOf<CanFrame>()
@@ -139,6 +189,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val PRESS_STAGE_MS = 5_000L
+        const val ADAPTER_CONNECTION_LOST = "Adapter connection lost"
         private const val PRESS_TICK_MS = 50L
         private const val OBD_POLL_DELAY_MS = 120L
         private const val OBD_CHART_MAX_POINTS = 120
@@ -154,6 +205,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshDevices()
         loadProfiles()
+        reloadObdDashboards()
         DtcCatalog.ensureLoaded(getApplication())
     }
 
@@ -194,16 +246,22 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
             ProfileRepository.loadAll(app)
         }.getOrElse { emptyList() }
         val userIds = profiles.map { it.id }.filter { ProfileRepository.isOnDisk(app, it) }.toSet()
+        val remembered = AppPreferences.getSelectedProfileId(app)
+            ?.takeIf { id -> profiles.any { p -> p.id == id } }
+        val current = _state.value.selectedProfileId
+            ?.takeIf { id -> profiles.any { p -> p.id == id } }
+        val selected = current ?: remembered ?: profiles.firstOrNull()?.id
+        if (selected != null && selected != remembered) {
+            AppPreferences.setSelectedProfileId(app, selected)
+        }
         _state.update {
-            val selected = it.selectedProfileId
-                ?.takeIf { id -> profiles.any { p -> p.id == id } }
-                ?: profiles.firstOrNull()?.id
             it.copy(
                 profiles = profiles,
                 userProfileIds = userIds,
                 selectedProfileId = selected,
             )
         }
+        reloadObdDashboards()
     }
 
     fun newBlankProfile(): VehicleProfile = VehicleProfile(
@@ -226,6 +284,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         runBusy("Saving profile…") {
             ProfileRepository.save(getApplication(), profile)
             loadProfiles()
+            AppPreferences.setSelectedProfileId(getApplication(), profile.id)
             _state.update { it.copy(selectedProfileId = profile.id, error = null) }
         }
     }
@@ -267,7 +326,16 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectProfile(id: String) {
-        _state.update { it.copy(selectedProfileId = id) }
+        AppPreferences.setSelectedProfileId(getApplication(), id)
+        _state.update { st ->
+            val clearActive = st.obdActiveDashboardScope == ObdDashboardScope.PROFILE
+            st.copy(
+                selectedProfileId = id,
+                obdActiveDashboardId = if (clearActive) null else st.obdActiveDashboardId,
+                obdActiveDashboardScope = if (clearActive) null else st.obdActiveDashboardScope,
+            )
+        }
+        reloadObdDashboards()
     }
 
     fun selectModule(id: String) {
@@ -305,17 +373,37 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
 
     fun disconnect() {
         runBusy("Disconnecting…") {
-            stopBackgroundLocked()
-            session?.close()
-            session = null
-            _state.update {
-                UiState(
-                    devices = it.devices,
-                    profiles = it.profiles,
-                    selectedAddress = it.selectedAddress,
-                    selectedProfileId = it.selectedProfileId,
-                )
-            }
+            clearSessionLocked(error = null)
+        }
+    }
+
+    /** Tear down the OBD session after a dead Bluetooth/adapter link. */
+    private fun forceDisconnect() {
+        clearSessionLocked(error = ADAPTER_CONNECTION_LOST)
+    }
+
+    private fun clearSessionLocked(error: String?) {
+        stopBackgroundLocked()
+        session?.close()
+        session = null
+        _state.update {
+            UiState(
+                devices = it.devices,
+                profiles = it.profiles,
+                userProfileIds = it.userProfileIds,
+                selectedAddress = it.selectedAddress,
+                selectedProfileId = it.selectedProfileId,
+                tab = AppTab.HOME,
+                error = error,
+            )
+        }
+    }
+
+    private fun handleSessionError(e: Exception) {
+        if (isLinkLost(e)) {
+            forceDisconnect()
+        } else {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
         }
     }
 
@@ -389,7 +477,11 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(discovered = found, discoverProgress = null, tab = AppTab.ECUS)
                 }
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.toString(), discoverProgress = null) }
+                if (isLinkLost(e)) {
+                    forceDisconnect()
+                } else {
+                    _state.update { it.copy(error = e.message ?: e.toString(), discoverProgress = null) }
+                }
             } finally {
                 _state.update { it.copy(busy = null) }
             }
@@ -418,6 +510,247 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun reloadObdDashboards() {
+        val app = getApplication<Application>()
+        val profileId = _state.value.selectedProfileId
+        val global = ObdDashboardRepository.listGlobal(app)
+            .map { it.toSummary(ObdDashboardScope.GLOBAL) }
+        val profile = profileId?.let { ObdDashboardRepository.listForProfile(app, it) }
+            ?.map { it.toSummary(ObdDashboardScope.PROFILE) }
+            .orEmpty()
+        val favorite = AppPreferences.getObdFavorite(app)
+        _state.update {
+            it.copy(
+                obdDashboardsGlobal = global,
+                obdDashboardsProfile = profile,
+                obdFavorite = favorite,
+            )
+        }
+    }
+
+    fun applyObdDashboard(id: String, scope: ObdDashboardScope) {
+        val app = getApplication<Application>()
+        val profileId = _state.value.selectedProfileId
+        try {
+            val dash = ObdDashboardRepository.load(
+                app,
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                id = id,
+            )
+            val keys = dash.signals.mapNotNull { it.toObdSignalId() }.toSet()
+            val result = applyDashboardSelection(_state.value.obdSignals, keys)
+            val err = if (result.skipped > 0) {
+                "${result.skipped} signals not in catalog"
+            } else {
+                null
+            }
+            _state.update {
+                it.copy(
+                    obdSignals = result.rows,
+                    obdActiveDashboardId = dash.id,
+                    obdActiveDashboardScope = scope,
+                    error = err,
+                )
+            }
+        } catch (e: Exception) {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
+        }
+    }
+
+    fun saveObdDashboard(name: String, scope: ObdDashboardScope) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) {
+            _state.update { it.copy(error = "Name required") }
+            return
+        }
+        val selected = _state.value.obdSignals.filter { it.selected }
+        if (selected.isEmpty()) {
+            _state.update { it.copy(error = "Select at least one signal") }
+            return
+        }
+        val profileId = _state.value.selectedProfileId
+        if (scope == ObdDashboardScope.PROFILE && profileId.isNullOrBlank()) {
+            _state.update { it.copy(error = "No profile selected") }
+            return
+        }
+        try {
+            val dash = ObdDashboard(
+                id = ObdDashboardIds.newId(trimmed),
+                name = trimmed,
+                signals = selected.map { it.key.toDashboardKey() },
+                updatedAtMs = System.currentTimeMillis(),
+            )
+            ObdDashboardRepository.save(
+                getApplication(),
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                dashboard = dash,
+            )
+            reloadObdDashboards()
+            _state.update {
+                it.copy(
+                    obdActiveDashboardId = dash.id,
+                    obdActiveDashboardScope = scope,
+                    error = null,
+                )
+            }
+        } catch (e: Exception) {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
+        }
+    }
+
+    fun updateActiveObdDashboard() {
+        val id = _state.value.obdActiveDashboardId
+        val scope = _state.value.obdActiveDashboardScope
+        if (id == null || scope == null) {
+            _state.update { it.copy(error = "No active dashboard") }
+            return
+        }
+        val selected = _state.value.obdSignals.filter { it.selected }
+        if (selected.isEmpty()) {
+            _state.update { it.copy(error = "Select at least one signal") }
+            return
+        }
+        val profileId = _state.value.selectedProfileId
+        try {
+            val existing = ObdDashboardRepository.load(
+                getApplication(),
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                id = id,
+            )
+            val updated = existing.copy(
+                signals = selected.map { it.key.toDashboardKey() },
+                updatedAtMs = System.currentTimeMillis(),
+            )
+            ObdDashboardRepository.save(
+                getApplication(),
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                dashboard = updated,
+            )
+            reloadObdDashboards()
+            _state.update { it.copy(error = null) }
+        } catch (e: Exception) {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
+        }
+    }
+
+    fun renameActiveObdDashboard(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) {
+            _state.update { it.copy(error = "Name required") }
+            return
+        }
+        val id = _state.value.obdActiveDashboardId
+        val scope = _state.value.obdActiveDashboardScope
+        if (id == null || scope == null) {
+            _state.update { it.copy(error = "No active dashboard") }
+            return
+        }
+        val profileId = _state.value.selectedProfileId
+        try {
+            val existing = ObdDashboardRepository.load(
+                getApplication(),
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                id = id,
+            )
+            val renamed = existing.copy(name = trimmed, updatedAtMs = System.currentTimeMillis())
+            ObdDashboardRepository.save(
+                getApplication(),
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                dashboard = renamed,
+            )
+            reloadObdDashboards()
+            _state.update { it.copy(error = null) }
+        } catch (e: Exception) {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
+        }
+    }
+
+    fun deleteActiveObdDashboard() {
+        val id = _state.value.obdActiveDashboardId
+        val scope = _state.value.obdActiveDashboardScope
+        if (id == null || scope == null) {
+            _state.update { it.copy(error = "No active dashboard") }
+            return
+        }
+        val app = getApplication<Application>()
+        val profileId = _state.value.selectedProfileId
+        try {
+            ObdDashboardRepository.delete(
+                app,
+                scope,
+                profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+                id = id,
+            )
+            val fav = AppPreferences.getObdFavorite(app)
+            if (fav != null && fav.dashboardId == id && fav.scope == scope) {
+                AppPreferences.clearObdFavorite(app)
+            }
+            reloadObdDashboards()
+            _state.update {
+                it.copy(
+                    obdActiveDashboardId = null,
+                    obdActiveDashboardScope = null,
+                    error = null,
+                )
+            }
+        } catch (e: Exception) {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
+        }
+    }
+
+    fun copyActiveGlobalDashboardToProfile() {
+        val id = _state.value.obdActiveDashboardId
+        val scope = _state.value.obdActiveDashboardScope
+        val profileId = _state.value.selectedProfileId
+        if (id == null || scope != ObdDashboardScope.GLOBAL) {
+            _state.update { it.copy(error = "Active dashboard must be global") }
+            return
+        }
+        if (profileId.isNullOrBlank()) {
+            _state.update { it.copy(error = "No profile selected") }
+            return
+        }
+        try {
+            val copy = ObdDashboardRepository.copyGlobalToProfile(getApplication(), id, profileId)
+            reloadObdDashboards()
+            _state.update {
+                it.copy(
+                    obdActiveDashboardId = copy.id,
+                    obdActiveDashboardScope = ObdDashboardScope.PROFILE,
+                    error = null,
+                )
+            }
+        } catch (e: Exception) {
+            _state.update { it.copy(error = e.message ?: e.toString()) }
+        }
+    }
+
+    fun setObdFavoriteDashboard(id: String, scope: ObdDashboardScope) {
+        val profileId = _state.value.selectedProfileId
+        if (scope == ObdDashboardScope.PROFILE && profileId.isNullOrBlank()) {
+            _state.update { it.copy(error = "No profile selected") }
+            return
+        }
+        val favorite = ObdFavoritePointer(
+            scope = scope,
+            dashboardId = id,
+            profileId = if (scope == ObdDashboardScope.PROFILE) profileId else null,
+        )
+        AppPreferences.setObdFavorite(getApplication(), favorite)
+        _state.update { it.copy(obdFavorite = favorite, error = null) }
+    }
+
+    fun clearObdFavoriteDashboard() {
+        AppPreferences.clearObdFavorite(getApplication())
+        _state.update { it.copy(obdFavorite = null, error = null) }
+    }
+
     fun refreshObdCatalog() {
         if (_state.value.status == null) return
         viewModelScope.launch {
@@ -429,21 +762,55 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val selected = _state.value.obdSignals.filter { it.selected }.map { it.key }.toSet()
-                val rows = buildObdCatalogRows(supportedPids, selected)
+                var rows = buildObdCatalogRows(supportedPids, selected)
+                val app = getApplication<Application>()
+                val favorite = AppPreferences.getObdFavorite(app)
+                val profileId = _state.value.selectedProfileId
+                var activeId: String? = null
+                var activeScope: ObdDashboardScope? = null
+                var applyError: String? = null
+                if (favorite != null && favorite.isApplicable(profileId)) {
+                    val dash = runCatching {
+                        ObdDashboardRepository.load(
+                            app,
+                            favorite.scope,
+                            if (favorite.scope == ObdDashboardScope.PROFILE) favorite.profileId else null,
+                            favorite.dashboardId,
+                        )
+                    }.getOrNull()
+                    if (dash != null) {
+                        val keys = dash.signals.mapNotNull { it.toObdSignalId() }.toSet()
+                        val applied = applyDashboardSelection(rows, keys)
+                        rows = applied.rows
+                        activeId = dash.id
+                        activeScope = favorite.scope
+                        if (applied.skipped > 0) {
+                            applyError = "${applied.skipped} signals not in catalog"
+                        }
+                    }
+                }
                 _state.update {
                     it.copy(
                         obdSignals = rows,
                         obdCatalogLoaded = true,
+                        obdActiveDashboardId = activeId ?: it.obdActiveDashboardId,
+                        obdActiveDashboardScope = activeScope ?: it.obdActiveDashboardScope,
+                        obdFavorite = favorite,
                         busy = null,
+                        error = applyError,
                     )
                 }
             } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        error = e.message ?: e.toString(),
-                        busy = null,
-                        obdCatalogLoaded = true,
-                    )
+                if (isLinkLost(e)) {
+                    forceDisconnect()
+                } else {
+                    _state.update {
+                        it.copy(
+                            error = e.message ?: e.toString(),
+                            busy = null,
+                            obdCatalogLoaded = true,
+                        )
+                    }
                 }
             }
         }
@@ -591,7 +958,11 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     delay(50)
                 }
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.toString(), sniffing = false) }
+                if (isLinkLost(e)) {
+                    forceDisconnect()
+                } else {
+                    _state.update { it.copy(error = e.message ?: e.toString(), sniffing = false) }
+                }
             } finally {
                 withContext(Dispatchers.IO) {
                     mutex.withLock { runCatching { session?.stopCanSniff() } }
@@ -710,7 +1081,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 _state.update { it.copy(sweptDids = found) }
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.toString()) }
+                handleSessionError(e)
             } finally {
                 _state.update { it.copy(busy = null) }
             }
@@ -731,7 +1102,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (which == "before") snapshotBefore = snap else snapshotAfter = snap
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.toString()) }
+                handleSessionError(e)
             } finally {
                 _state.update { it.copy(busy = null) }
             }
@@ -773,9 +1144,19 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         val pids = keys.filter { it.source == LiveSource.PID }.map { it.id }
         val didPins = keys.filter { it.source == LiveSource.DID }.mapNotNull { key ->
             val moduleId = key.moduleId ?: return@mapNotNull null
+            val ford = fordDidPins[key]
+            val pinned = pinnedDids.find { it.moduleId == moduleId && it.did == key.id }
             val label = _state.value.obdSignals.find { it.key == key }?.label
-                ?: pinnedDids.find { it.moduleId == moduleId && it.did == key.id }?.label
-            LiveDidPin(moduleId, key.id, label)
+                ?: ford?.label
+                ?: pinned?.label
+            LiveDidPin(
+                moduleId = moduleId,
+                did = key.id,
+                label = label,
+                equation = ford?.equation ?: pinned?.equation,
+                unit = ford?.unit ?: pinned?.unit
+                    ?: _state.value.obdSignals.find { it.key == key }?.unit,
+            )
         }
         obdPollJob = viewModelScope.launch {
             _state.update { it.copy(obdPolling = true, busy = null) }
@@ -790,11 +1171,15 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     delay(OBD_POLL_DELAY_MS)
                 }
             } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        error = e.message ?: e.toString(),
-                        obdPolling = false,
-                    )
+                if (isLinkLost(e)) {
+                    forceDisconnect()
+                } else {
+                    _state.update {
+                        it.copy(
+                            error = e.message ?: e.toString(),
+                            obdPolling = false,
+                        )
+                    }
                 }
             } finally {
                 _state.update { it.copy(obdPolling = false) }
@@ -807,9 +1192,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         keys: List<ObdSignalId>,
         chartOnly: Boolean,
     ) {
-        val byKey = samples.associateBy { s ->
-            ObdSignalId(s.source, s.id, s.moduleId)
-        }
+        val byKey = samples.associateBy(::obdSampleKey)
         val ts = samples.firstOrNull()?.tsMs ?: System.currentTimeMillis()
 
         if (obdRecording && !chartOnly) {
@@ -865,8 +1248,15 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
     ): List<ObdSignalRow> {
         val existing = _state.value.obdSignals.associateBy { it.key }
         val rows = linkedMapOf<ObdSignalId, ObdSignalRow>()
+        val scanSupported = runCatching {
+            FordExtendedPidCatalog.loadMode01ScanSupported(getApplication())
+        }.getOrDefault(emptySet())
 
-        for (pid in supportedPids.sorted()) {
+        // Confirmed (scan) Mode 01 first, then remaining by PID id.
+        val orderedPids = supportedPids.sortedWith(
+            compareByDescending<Int> { it in scanSupported }.thenBy { it },
+        )
+        for (pid in orderedPids) {
             val key = ObdSignalId(LiveSource.PID, pid, null)
             val prev = existing[key]
             rows[key] = ObdSignalRow(
@@ -877,6 +1267,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                 lastValue = prev?.lastValue,
                 lastText = prev?.lastText,
                 chartable = prev?.chartable == true || pidLabel(pid) != null,
+                confirmed = pid in scanSupported,
             )
         }
 
@@ -902,8 +1293,53 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                 pin.moduleId,
                 pin.did,
                 pin.label ?: "DID 0x%04X".format(pin.did),
+                unit = pin.unit,
+                chartable = !pin.equation.isNullOrBlank(),
             )
         }
+
+        val fordMeta = linkedMapOf<ObdSignalId, LiveDidPin>()
+        if (profile != null) {
+            val catalog = runCatching {
+                FordExtendedPidCatalog.load(getApplication())
+            }.getOrDefault(emptyList())
+            for (resolved in resolveFordExtendedPids(catalog, profile)) {
+                if (!resolved.pid.isMode22) continue
+                val did = resolved.pid.pidOrDid
+                val key = ObdSignalId(LiveSource.DID, did, resolved.moduleId)
+                val pin = LiveDidPin(
+                    moduleId = resolved.moduleId,
+                    did = did,
+                    label = resolved.pid.name,
+                    equation = resolved.pid.equation,
+                    unit = resolved.pid.unit.ifBlank { null },
+                )
+                // First equation wins for a given module+DID
+                if (!fordMeta.containsKey(key)) {
+                    fordMeta[key] = pin
+                }
+                if (rows.containsKey(key)) {
+                    // Enrich existing row with unit/chartable when missing
+                    val prev = rows[key]!!
+                    rows[key] = prev.copy(
+                        unit = prev.unit ?: pin.unit,
+                        chartable = prev.chartable || pin.equation != null,
+                    )
+                    continue
+                }
+                addDidRow(
+                    rows,
+                    existing,
+                    selected,
+                    resolved.moduleId,
+                    did,
+                    resolved.pid.name,
+                    unit = pin.unit,
+                    chartable = true,
+                )
+            }
+        }
+        fordDidPins = fordMeta
 
         val sweepModule = _state.value.selectedModuleId
         if (sweepModule != null) {
@@ -924,6 +1360,8 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         moduleId: String,
         did: Int,
         label: String,
+        unit: String? = null,
+        chartable: Boolean = false,
     ) {
         val key = ObdSignalId(LiveSource.DID, did, moduleId)
         if (rows.containsKey(key)) return
@@ -931,11 +1369,11 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
         rows[key] = ObdSignalRow(
             key = key,
             label = "$label ($moduleId)",
-            unit = prev?.unit,
+            unit = prev?.unit ?: unit,
             selected = key in selected || prev?.selected == true,
             lastValue = prev?.lastValue,
             lastText = prev?.lastText,
-            chartable = prev?.chartable == true,
+            chartable = prev?.chartable == true || chartable,
         )
     }
 
@@ -1004,7 +1442,7 @@ class FordDiagViewModel(app: Application) : AndroidViewModel(app) {
                     mutex.withLock { block() }
                 }
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.toString()) }
+                handleSessionError(e)
             } finally {
                 _state.update { it.copy(busy = null) }
             }

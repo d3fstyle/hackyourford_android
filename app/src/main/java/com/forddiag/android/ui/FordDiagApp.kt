@@ -14,12 +14,13 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -171,6 +172,14 @@ fun FordDiagApp(viewModel: FordDiagViewModel) {
                         onStartChart = viewModel::startObdChart,
                         onCloseFullscreen = viewModel::stopObdFullscreen,
                         onConsumePendingCsv = viewModel::consumeObdPendingCsv,
+                        onApplyDashboard = viewModel::applyObdDashboard,
+                        onSaveDashboard = viewModel::saveObdDashboard,
+                        onUpdateActiveDashboard = viewModel::updateActiveObdDashboard,
+                        onRenameActiveDashboard = viewModel::renameActiveObdDashboard,
+                        onDeleteActiveDashboard = viewModel::deleteActiveObdDashboard,
+                        onCopyGlobalDashboardToProfile = viewModel::copyActiveGlobalDashboardToProfile,
+                        onSetFavoriteDashboard = viewModel::setObdFavoriteDashboard,
+                        onClearFavoriteDashboard = viewModel::clearObdFavoriteDashboard,
                     )
                 }
             }
@@ -1238,6 +1247,9 @@ private fun DtcGroupCard(group: ModuleDtcGroup, busy: Boolean, onClear: () -> Un
     }
 }
 
+private val LiveCandidateBlockMaxHeight = 200.dp
+private val AnalyzeResultsListMaxHeight = 360.dp
+
 @Composable
 private fun LiveScreen(
     state: UiState,
@@ -1322,36 +1334,44 @@ private fun LiveScreen(
                     .border(1.dp, Line)
                     .background(Bg),
             ) {
-                items(
+                itemsIndexed(
                     frames,
-                    key = { "${it.tsMs}-${it.id}-${it.rawLine}-${it.hashCode()}" },
-                ) { frame ->
+                    key = { index, frame -> liveFrameRowKey(index, frame) },
+                ) { _, frame ->
                     FrameRow(frame)
                 }
             }
         }
 
         if (state.candidates.isNotEmpty() && !state.analyzeResultsOpen) {
-            Text("CANDIDATES", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
-            state.candidates.forEach { c ->
-                CandidateRow(
-                    c = c,
-                    onCopyId = {
-                        val id = "0x%03X".format(c.canId)
-                        copyTextToClipboard(context, "CAN ID", id)
-                        onFrameIdFilter(id)
-                    },
-                    onExport = {
-                        val payload = exportCandidatePayload(c)
-                        shareFile(
-                            context,
-                            exportCsvFilename(payload.filenamePrefix),
-                            payload.csv,
-                            "text/csv",
-                            "Export candidate",
-                        )
-                    },
-                )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = LiveCandidateBlockMaxHeight)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text("CANDIDATES", color = TextMuted, fontSize = 11.sp, letterSpacing = 1.sp)
+                state.candidates.forEach { c ->
+                    CandidateRow(
+                        c = c,
+                        onCopyId = {
+                            val id = "0x%03X".format(c.canId)
+                            copyTextToClipboard(context, "CAN ID", id)
+                            onFrameIdFilter(id)
+                        },
+                        onExport = {
+                            val payload = exportCandidatePayload(c)
+                            shareFile(
+                                context,
+                                exportCsvFilename(payload.filenamePrefix),
+                                payload.csv,
+                                "text/csv",
+                                "Export candidate",
+                            )
+                        },
+                    )
+                }
             }
         }
     }
@@ -1405,18 +1425,23 @@ private fun LiveScreen(
             onDismissRequest = onDismissAnalyzeResults,
             title = { Text("Candidatos (${state.candidates.size})") },
             text = {
-                Column(
+                LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
+                        .heightIn(max = AnalyzeResultsListMaxHeight),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        "Pulsa una fila para copiar el ID. Export guarda solo ese análisis.",
-                        color = TextMuted,
-                        fontSize = 12.sp,
-                    )
-                    state.candidates.forEach { c ->
+                    item {
+                        Text(
+                            "Pulsa una fila para copiar el ID. Export guarda solo ese análisis.",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    itemsIndexed(
+                        state.candidates,
+                        key = { index, c -> "$index-${c.canId}-${c.byteIndex}-${c.bitIndex}" },
+                    ) { _, c ->
                         CandidateRow(
                             c = c,
                             onCopyId = {

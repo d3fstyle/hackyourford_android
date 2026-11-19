@@ -50,9 +50,11 @@ data class DiscoveredEcu(
     val error: String?,
 )
 
-/** Pinned DID for live polling: moduleId, did, optional label. */
+/** Pinned DID for live polling: moduleId, did, optional label / Torque equation. */
 data class LiveDidPin(
     val moduleId: String,
     val did: Int,
     val label: String?,
+    val equation: String? = null,
+    val unit: String? = null,
 )

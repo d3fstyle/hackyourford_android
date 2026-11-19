@@ -188,7 +188,7 @@ class ProtocolTest {
         assertFalse(c.isEmpty())
         assertEquals(0x3B3, c[0].canId)
         assertEquals(1, c[0].byteIndex)
-        assertTrue(c[0].changeScore >= 0.5)
+        assertTrue(c[0].changeScore >= 0.4)
     }
 
     @Test
@@ -213,8 +213,100 @@ class ProtocolTest {
     }
 
     @Test
+    fun correlatePressSequenceFindsButtonBitInsideNoisyByte() {
+        val stages = listOf(
+            CaptureStage(0, 0, 99),
+            CaptureStage(1, 100, 199),
+            CaptureStage(2, 200, 299),
+            CaptureStage(3, 300, 399),
+        )
+        val frames = mutableListOf<CanFrame>()
+        var counter = 0
+        fun payload(t: Long, buttonHigh: Boolean): ByteArray {
+            val low = (counter and 0x0F).toByte()
+            counter = (counter + 1) and 0x0F
+            val button = if (buttonHigh) 0x80 else 0x00
+            return byteArrayOf((low.toInt() or button).toByte())
+        }
+        // Noisy counter in nibble 0 throughout; button bit 7 quiet in baseline
+        for (t in 0L..90 step 10) {
+            frames += CanFrame(t, 0x3B3, payload(t, buttonHigh = false), "")
+        }
+        // 1 press: two edges on bit 7
+        frames += CanFrame(110, 0x3B3, payload(110, false), "")
+        frames += CanFrame(120, 0x3B3, payload(120, true), "")
+        frames += CanFrame(130, 0x3B3, payload(130, false), "")
+        for (t in 140L..190 step 10) {
+            frames += CanFrame(t, 0x3B3, payload(t, false), "")
+        }
+        // 2 presses
+        frames += CanFrame(210, 0x3B3, payload(210, false), "")
+        frames += CanFrame(220, 0x3B3, payload(220, true), "")
+        frames += CanFrame(230, 0x3B3, payload(230, false), "")
+        frames += CanFrame(240, 0x3B3, payload(240, true), "")
+        frames += CanFrame(250, 0x3B3, payload(250, false), "")
+        for (t in 260L..290 step 10) {
+            frames += CanFrame(t, 0x3B3, payload(t, false), "")
+        }
+        // 3 presses
+        frames += CanFrame(310, 0x3B3, payload(310, false), "")
+        frames += CanFrame(320, 0x3B3, payload(320, true), "")
+        frames += CanFrame(330, 0x3B3, payload(330, false), "")
+        frames += CanFrame(340, 0x3B3, payload(340, true), "")
+        frames += CanFrame(350, 0x3B3, payload(350, false), "")
+        frames += CanFrame(360, 0x3B3, payload(360, true), "")
+        frames += CanFrame(370, 0x3B3, payload(370, false), "")
+        for (t in 380L..390 step 10) {
+            frames += CanFrame(t, 0x3B3, payload(t, false), "")
+        }
+
+        val c = correlatePressSequence(frames, stages)
+        val hit = c.find { it.canId == 0x3B3 && it.byteIndex == 0 && it.bitIndex == 7 }
+        assertTrue("Expected bit 7 candidate inside noisy byte, got: $c", hit != null)
+        assertTrue(hit!!.changeScore >= 0.4)
+    }
+
+    @Test
+    fun correlatePressSequenceAcceptsProportionalCounts() {
+        val stages = listOf(
+            CaptureStage(0, 0, 99),
+            CaptureStage(1, 100, 199),
+            CaptureStage(2, 200, 299),
+            CaptureStage(3, 300, 399),
+        )
+        val frames = mutableListOf<CanFrame>()
+        frames += CanFrame(10, 0x3B3, byteArrayOf(0x00), "")
+        frames += CanFrame(50, 0x3B3, byteArrayOf(0x00), "")
+
+        fun addEdges(start: Long, edges: Int) {
+            var v = 0
+            var t = start
+            frames += CanFrame(t, 0x3B3, byteArrayOf(v.toByte()), "")
+            repeat(edges) {
+                t += 5
+                v = v xor 1
+                frames += CanFrame(t, 0x3B3, byteArrayOf(v.toByte()), "")
+            }
+        }
+        // ~10 / 20 / 30 edges — not exact 1/2/3 or 2/4/6
+        addEdges(110, 10)
+        addEdges(210, 20)
+        addEdges(310, 30)
+
+        val c = correlatePressSequence(frames, stages)
+        assertFalse("Proportional 10/20/30 should match, got: $c", c.isEmpty())
+        assertEquals(0x3B3, c[0].canId)
+        assertTrue(c[0].changeScore >= 0.4)
+    }
+
+    @Test
     fun sequenceSimilarityPerfectMatch() {
         assertEquals(1.0, sequenceSimilarity(listOf(2.0, 4.0, 6.0), listOf(2.0, 4.0, 6.0)), 1e-9)
+    }
+
+    @Test
+    fun pearsonCorrelationPerfectProportion() {
+        assertEquals(1.0, pearsonCorrelation(listOf(10.0, 20.0, 30.0), listOf(1.0, 2.0, 3.0)), 1e-9)
     }
 
     @Test
@@ -227,5 +319,56 @@ class ProtocolTest {
         assertEquals(0xF190, diff[1].first)
         assertEquals("AA", diff[1].second)
         assertEquals("BB", diff[1].third)
+    }
+
+    @Test
+    fun monitorOutputEndedDetectsBufferFull() {
+        assertTrue(monitorOutputEnded("7E8 08 AA\rBUFFER FULL\r"))
+        assertTrue(monitorOutputEnded("STOPPED"))
+        assertFalse(monitorOutputEnded("7E8 08 AA BB CC DD EE FF"))
+        assertFalse(monitorOutputEnded(""))
+    }
+
+    @Test
+    fun readSniffChunkRestartsAtmaAfterBufferFull() {
+        val t = MockTransport()
+        val stn = StnSession(t)
+        val session = ScannerSession("AA:BB", t, stn)
+        t.enqueueMonitorChunk("7E8 08 41 0C 1A F8\rBUFFER FULL\r", hitPrompt = true)
+        val frames = session.readSniffChunk(50)
+        assertFalse(frames.isEmpty())
+        assertTrue(
+            "expected ATMA restart after BUFFER FULL, sent=$t.sent",
+            t.sent.count { it.equals("ATMA", ignoreCase = true) } >= 1,
+        )
+        assertTrue(t.monitoring)
+    }
+
+    @Test
+    fun pidLabelCoversTorqueCatalog() {
+        assertEquals("RPM", pidLabel(0x0C))
+        assertEquals("Fuel level", pidLabel(0x2F))
+        assertEquals("Engine Fuel Rate", pidLabel(0x9D))
+        assertEquals("Cylinder Fuel Rate", pidLabel(0xA2))
+        assertEquals(null, pidLabel(0x00))
+        assertEquals(null, pidLabel(0xA0))
+    }
+
+    @Test
+    fun listSupportedPidsContinuesPast60() {
+        val t = MockTransport()
+        // bit0 of last byte = next range supported for 00/20/40/60/80
+        t.expect("0100", "41 00 BE 1F A8 13") // next=1
+        t.expect("0120", "41 20 80 00 00 01") // next=1, claims 0x21
+        t.expect("0140", "41 40 FE D0 00 01") // next=1
+        t.expect("0160", "41 60 00 00 00 01") // next=1
+        t.expect("0180", "41 80 00 00 00 01") // next=1
+        t.expect("01A0", "41 A0 40 00 00 00") // next=0, bit1 → 0xA2
+        val pids = listSupportedPids(t)
+        assertTrue(pids.contains(0x0C))
+        assertTrue(pids.contains(0x21))
+        assertTrue("expected 0xA2 from 01A0 bitmask, got $pids", pids.contains(0xA2))
+        assertFalse(pids.contains(0x80))
+        assertFalse(pids.contains(0xA0))
     }
 }

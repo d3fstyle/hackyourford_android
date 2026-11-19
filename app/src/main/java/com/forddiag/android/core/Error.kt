@@ -13,6 +13,26 @@ sealed class FordException(message: String) : Exception(message) {
     class Other(msg: String) : FordException(msg)
 }
 
+/** True when the failure indicates the Bluetooth/adapter link is dead. */
+fun isLinkLost(error: Throwable): Boolean {
+    var cur: Throwable? = error
+    while (cur != null) {
+        when (cur) {
+            is java.io.IOException -> return true
+            is FordException.Timeout -> return true
+        }
+        val msg = cur.message.orEmpty().lowercase()
+        if (msg.contains("broken pipe") ||
+            msg.contains("socket closed") ||
+            msg.contains("connection reset")
+        ) {
+            return true
+        }
+        cur = cur.cause
+    }
+    return false
+}
+
 fun nrcDescription(nrc: Int): String = when (nrc) {
     0x10 -> "generalReject"
     0x11 -> "serviceNotSupported"

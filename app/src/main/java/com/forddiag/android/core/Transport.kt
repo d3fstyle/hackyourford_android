@@ -29,6 +29,12 @@ interface Transport {
         throw FordException.Other("readMonitorChunk not supported on this transport")
     }
 
+    /**
+     * True if the last [readMonitorChunk] hit the ELM prompt (`>`), meaning ATMA ended.
+     * Cleared by the next [startMonitor] / [readMonitorChunk].
+     */
+    fun lastMonitorHitPrompt(): Boolean = false
+
     /** Interrupt ATMA and resync to the prompt. */
     fun stopMonitor() {
         writeRaw("\r".toByteArray(Charsets.US_ASCII))
@@ -109,16 +115,17 @@ class MockTransport : Transport {
     private val scripts = ArrayDeque<Pair<String, String>>()
     val sent = mutableListOf<String>()
     private var timeoutMs = 1_000L
-    private val monitorChunks = ArrayDeque<String>()
+    private val monitorChunks = ArrayDeque<Pair<String, Boolean>>()
     var monitoring = false
         private set
+    private var hitPrompt = false
 
     fun expect(prefix: String, response: String) {
         scripts.addLast(prefix to response)
     }
 
-    fun enqueueMonitorChunk(chunk: String) {
-        monitorChunks.addLast(chunk)
+    fun enqueueMonitorChunk(chunk: String, hitPrompt: Boolean = false) {
+        monitorChunks.addLast(chunk to hitPrompt)
     }
 
     override fun command(cmd: String): String {
@@ -143,20 +150,35 @@ class MockTransport : Transport {
         sent += String(bytes, Charsets.US_ASCII).trimEnd('\r')
         if (String(bytes, Charsets.US_ASCII).uppercase().startsWith("ATMA")) {
             monitoring = true
+            hitPrompt = false
         }
         if (bytes.contentEquals(byteArrayOf('\r'.code.toByte()))) {
             monitoring = false
         }
     }
 
+    override fun startMonitor() {
+        hitPrompt = false
+        writeRaw("ATMA\r".toByteArray(Charsets.US_ASCII))
+    }
+
     override fun readMonitorChunk(maxWaitMs: Long): String {
-        if (monitorChunks.isNotEmpty()) return monitorChunks.removeFirst()
+        hitPrompt = false
+        if (monitorChunks.isNotEmpty()) {
+            val (chunk, prompt) = monitorChunks.removeFirst()
+            hitPrompt = prompt || monitorOutputEnded(chunk)
+            if (hitPrompt) monitoring = false
+            return chunk
+        }
         sleepQuiet(minOf(maxWaitMs, 5))
         return ""
     }
 
+    override fun lastMonitorHitPrompt(): Boolean = hitPrompt
+
     override fun stopMonitor() {
         monitoring = false
+        hitPrompt = false
         sent += "STOP_MONITOR"
     }
 

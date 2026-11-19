@@ -294,7 +294,7 @@ class ScannerSession(
         return found
     }
 
-    /** One live poll cycle: Mode 01 PIDs + selected UDS DIDs. */
+    /** One live poll cycle: Mode 01 PIDs + selected UDS DIDs (incl. Ford extended). */
     fun pollLiveOnce(pids: List<Int>, dids: List<LiveDidPin>): List<LiveSample> {
         val tsMs = System.currentTimeMillis()
         val samples = mutableListOf<LiveSample>()
@@ -311,7 +311,7 @@ class ScannerSession(
                         id = pid,
                         rawHex = s.hex,
                         decoded = s.decoded ?: s.hex,
-                        moduleId = "PCM",
+                        moduleId = null,
                         label = s.label ?: pidLabel(pid) ?: "PID %02X".format(pid),
                         value = s.value,
                         unit = s.unit,
@@ -321,8 +321,17 @@ class ScannerSession(
         }
 
         val profile = this.profile
-        for (pin in dids) {
-            val module = profile?.module(pin.moduleId) ?: continue
+        // Prefer Ford baro DID first so BARO() equations can use it in the same cycle.
+        val orderedDids = dids.sortedBy { pin ->
+            when {
+                pin.did == FORD_BARO_DID -> 0
+                pin.equation?.uppercase()?.contains("BARO()") == true -> 2
+                else -> 1
+            }
+        }
+        var baro: Double? = null
+        for (pin in orderedDids) {
+            val module = resolvePollModule(profile, pin.moduleId) ?: continue
             runCatching {
                 withModule(module) { t ->
                     val uds = UdsClient(t)
@@ -331,10 +340,22 @@ class ScannerSession(
                 }
             }
                 .onSuccess { v ->
-                    val numeric = rawNumericDid(v.data)
-                    val display = v.ascii?.takeIf { it.isNotBlank() }
-                        ?: numeric?.let { "%.0f".format(it) }
-                        ?: v.hex
+                    val eq = pin.equation
+                    val numeric = if (!eq.isNullOrBlank()) {
+                        TorqueEquation.evaluate(eq, v.data, baro)
+                    } else {
+                        rawNumericDid(v.data)
+                    }
+                    if (pin.did == FORD_BARO_DID && numeric != null) {
+                        baro = numeric
+                    }
+                    val unit = pin.unit
+                    val display = when {
+                        numeric != null && !unit.isNullOrBlank() -> formatFordValue(numeric, unit)
+                        numeric != null -> formatFordValue(numeric, "")
+                        !v.ascii.isNullOrBlank() -> v.ascii
+                        else -> v.hex
+                    }
                     samples += LiveSample(
                         tsMs = tsMs,
                         source = LiveSource.DID,
@@ -344,7 +365,7 @@ class ScannerSession(
                         moduleId = pin.moduleId,
                         label = pin.label ?: "DID 0x%04X".format(pin.did),
                         value = numeric,
-                        unit = null,
+                        unit = unit,
                     )
                 }
                 .onFailure { lastErr = it.message ?: it.toString() }
@@ -363,12 +384,19 @@ class ScannerSession(
         stn.selectBus(bus)
         stn.clearReceiveFilter()
         runCatching { transport.command("ATH1") }
+        // Raw CAN frames; leave ISO-TP formatting off during ATMA.
+        runCatching { transport.command("ATCAF0") }
         stn.startMonitor()
     }
 
     fun readSniffChunk(maxWaitMs: Long): List<CanFrame> {
         val chunk = stn.readMonitorChunk(maxWaitMs)
-        return parseMonitorBuffer(chunk, System.currentTimeMillis())
+        val frames = parseMonitorBuffer(chunk, System.currentTimeMillis())
+        // ELM ATMA stops on BUFFER FULL / STOPPED / prompt — Torque re-issues ATMA.
+        if (transport.lastMonitorHitPrompt() || monitorOutputEnded(chunk)) {
+            stn.startMonitor()
+        }
+        return frames
     }
 
     fun stopCanSniff() {
@@ -422,6 +450,22 @@ class ScannerSession(
     }
 
     companion object {
+        /** Ford-specific barometric pressure DID used by Torque BARO(). */
+        const val FORD_BARO_DID = 0x1127
+
+        /** Profile module or synthetic `HDR_XXX` from hex header. */
+        fun resolvePollModule(profile: VehicleProfile?, moduleId: String): ModuleDef? {
+            profile?.module(moduleId)?.let { return it }
+            val m = Regex("""^HDR_([0-9A-Fa-f]+)$""").matchEntire(moduleId) ?: return null
+            val tx = m.groupValues[1].toIntOrNull(16) ?: return null
+            return ModuleDef(
+                id = moduleId,
+                name = "Header 0x%03X".format(tx),
+                txId = tx,
+                bus = "hs",
+            )
+        }
+
         fun connect(
             context: android.content.Context,
             address: String,

@@ -1,5 +1,6 @@
 # FordDiag Android
-
+> [!NOTE]  
+> This is a work in progress, only tested with ford models listed below. Currently is read only (no ability to send anything to the car) 
 Kotlin + Jetpack Compose port of [FordDiag](../fordscanner) for **Android**.
 
 Same goal: diagnose Ford modules over OBD (Focus / Tourneo Connect 2017 profiles), with **OBDLink MX / MX+** as the primary adapter via **Bluetooth Classic (SPP)**.

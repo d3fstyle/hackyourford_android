@@ -38,6 +38,7 @@ class BluetoothTransport private constructor(
     private val output: OutputStream,
 ) : Transport {
     private var timeoutMs = 5_000L
+    @Volatile private var monitorHitPrompt = false
 
     override fun setTimeoutMs(timeoutMs: Long) {
         this.timeoutMs = timeoutMs
@@ -56,12 +57,14 @@ class BluetoothTransport private constructor(
     }
 
     override fun startMonitor() {
+        monitorHitPrompt = false
         drain()
         // ATMA does not return until stopped — do not wait for prompt.
         writeRaw("ATMA\r".toByteArray(Charsets.US_ASCII))
     }
 
     override fun readMonitorChunk(maxWaitMs: Long): String {
+        monitorHitPrompt = false
         val deadline = System.currentTimeMillis() + maxWaitMs
         val buf = StringBuilder()
         val maxLen = 8192
@@ -75,6 +78,7 @@ class BluetoothTransport private constructor(
                 for (i in 0 until read) {
                     val c = chunk[i].toInt().toChar()
                     if (c == '>') {
+                        monitorHitPrompt = true
                         return buf.toString()
                     }
                     buf.append(c)
@@ -84,10 +88,17 @@ class BluetoothTransport private constructor(
                 sleepQuiet(10)
             }
         }
-        return buf.toString()
+        val text = buf.toString()
+        if (monitorOutputEnded(text)) {
+            monitorHitPrompt = true
+        }
+        return text
     }
 
+    override fun lastMonitorHitPrompt(): Boolean = monitorHitPrompt
+
     override fun stopMonitor() {
+        monitorHitPrompt = false
         writeRaw("\r".toByteArray(Charsets.US_ASCII))
         sleepQuiet(50)
         try {
@@ -274,6 +285,8 @@ class StnSession(private val transport: Transport) {
     }
 
     fun readMonitorChunk(maxWaitMs: Long): String = transport.readMonitorChunk(maxWaitMs)
+
+    fun lastMonitorHitPrompt(): Boolean = transport.lastMonitorHitPrompt()
 
     fun stopMonitor() {
         transport.stopMonitor()

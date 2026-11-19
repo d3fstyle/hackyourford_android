@@ -23,16 +23,28 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -41,12 +53,16 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.forddiag.android.core.LiveSource
+import com.forddiag.android.core.ObdDashboardScope
 import com.forddiag.android.ui.theme.Accent
 import com.forddiag.android.ui.theme.Bg
 import com.forddiag.android.ui.theme.BgDeep
@@ -59,6 +75,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
+private enum class ObdDashboardDialog { None, Save, Rename }
+
 @Composable
 fun ObdScreen(
     state: UiState,
@@ -69,6 +87,14 @@ fun ObdScreen(
     onStartChart: (ObdSignalId) -> Unit,
     onCloseFullscreen: () -> Unit,
     onConsumePendingCsv: () -> Unit,
+    onApplyDashboard: (String, ObdDashboardScope) -> Unit,
+    onSaveDashboard: (String, ObdDashboardScope) -> Unit,
+    onUpdateActiveDashboard: () -> Unit,
+    onRenameActiveDashboard: (String) -> Unit,
+    onDeleteActiveDashboard: () -> Unit,
+    onCopyGlobalDashboardToProfile: () -> Unit,
+    onSetFavoriteDashboard: (String, ObdDashboardScope) -> Unit,
+    onClearFavoriteDashboard: () -> Unit,
 ) {
     val context = LocalContext.current
     LaunchedEffect(state.obdPendingCsv) {
@@ -91,6 +117,14 @@ fun ObdScreen(
             onToggleSignal = onToggleSignal,
             onStartGauges = onStartGauges,
             onStartChart = onStartChart,
+            onApplyDashboard = onApplyDashboard,
+            onSaveDashboard = onSaveDashboard,
+            onUpdateActiveDashboard = onUpdateActiveDashboard,
+            onRenameActiveDashboard = onRenameActiveDashboard,
+            onDeleteActiveDashboard = onDeleteActiveDashboard,
+            onCopyGlobalDashboardToProfile = onCopyGlobalDashboardToProfile,
+            onSetFavoriteDashboard = onSetFavoriteDashboard,
+            onClearFavoriteDashboard = onClearFavoriteDashboard,
         )
         ObdUiMode.GAUGES -> ObdGaugesFullscreen(
             signals = state.obdSignals.filter { it.selected },
@@ -138,6 +172,14 @@ private fun ObdListScreen(
     onToggleSignal: (ObdSignalId) -> Unit,
     onStartGauges: () -> Unit,
     onStartChart: (ObdSignalId) -> Unit,
+    onApplyDashboard: (String, ObdDashboardScope) -> Unit,
+    onSaveDashboard: (String, ObdDashboardScope) -> Unit,
+    onUpdateActiveDashboard: () -> Unit,
+    onRenameActiveDashboard: (String) -> Unit,
+    onDeleteActiveDashboard: () -> Unit,
+    onCopyGlobalDashboardToProfile: () -> Unit,
+    onSetFavoriteDashboard: (String, ObdDashboardScope) -> Unit,
+    onClearFavoriteDashboard: () -> Unit,
 ) {
     val selectedCount = state.obdSignals.count { it.selected }
 
@@ -173,6 +215,18 @@ private fun ObdListScreen(
                 Text("Start ($selectedCount)", maxLines = 1)
             }
         }
+
+        ObdDashboardBar(
+            state = state,
+            onApplyDashboard = onApplyDashboard,
+            onSaveDashboard = onSaveDashboard,
+            onUpdateActiveDashboard = onUpdateActiveDashboard,
+            onRenameActiveDashboard = onRenameActiveDashboard,
+            onDeleteActiveDashboard = onDeleteActiveDashboard,
+            onCopyGlobalDashboardToProfile = onCopyGlobalDashboardToProfile,
+            onSetFavoriteDashboard = onSetFavoriteDashboard,
+            onClearFavoriteDashboard = onClearFavoriteDashboard,
+        )
 
         Row(
             modifier = Modifier
@@ -249,13 +303,24 @@ private fun ObdSignalListRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                row.label,
-                color = TextPrimary,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    row.label,
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (row.confirmed) {
+                    Text(
+                        " scan",
+                        color = Accent,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                    )
+                }
+            }
             val meta = buildString {
                 append(
                     when (row.key.source) {
@@ -284,6 +349,279 @@ private fun ObdSignalListRow(
 
 private fun signalKey(id: ObdSignalId): String =
     "${id.source}:${id.moduleId ?: ""}:${id.id}"
+
+@Composable
+private fun ObdDashboardBar(
+    state: UiState,
+    onApplyDashboard: (String, ObdDashboardScope) -> Unit,
+    onSaveDashboard: (String, ObdDashboardScope) -> Unit,
+    onUpdateActiveDashboard: () -> Unit,
+    onRenameActiveDashboard: (String) -> Unit,
+    onDeleteActiveDashboard: () -> Unit,
+    onCopyGlobalDashboardToProfile: () -> Unit,
+    onSetFavoriteDashboard: (String, ObdDashboardScope) -> Unit,
+    onClearFavoriteDashboard: () -> Unit,
+) {
+    var pickerOpen by remember { mutableStateOf(false) }
+    var actionsOpen by remember { mutableStateOf(false) }
+    var dialog by remember { mutableStateOf(ObdDashboardDialog.None) }
+    var nameDraft by remember { mutableStateOf("") }
+    var saveScope by remember { mutableStateOf(ObdDashboardScope.PROFILE) }
+
+    val activeName = remember(
+        state.obdActiveDashboardId,
+        state.obdActiveDashboardScope,
+        state.obdDashboardsProfile,
+        state.obdDashboardsGlobal,
+    ) {
+        val id = state.obdActiveDashboardId ?: return@remember null
+        val scope = state.obdActiveDashboardScope ?: return@remember null
+        val list = when (scope) {
+            ObdDashboardScope.PROFILE -> state.obdDashboardsProfile
+            ObdDashboardScope.GLOBAL -> state.obdDashboardsGlobal
+        }
+        list.find { it.id == id }?.name
+    }
+
+    val hasActive = state.obdActiveDashboardId != null && state.obdActiveDashboardScope != null
+    val favoriteMatchesActive = state.obdFavorite != null &&
+        state.obdFavorite.dashboardId == state.obdActiveDashboardId &&
+        state.obdFavorite.scope == state.obdActiveDashboardScope
+    val canSaveProfile = !state.selectedProfileId.isNullOrBlank()
+    val canCopyToProfile = hasActive &&
+        state.obdActiveDashboardScope == ObdDashboardScope.GLOBAL &&
+        canSaveProfile
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, Line, RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { pickerOpen = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    activeName ?: "Dashboards",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            DropdownMenu(expanded = pickerOpen, onDismissRequest = { pickerOpen = false }) {
+                if (state.obdDashboardsProfile.isEmpty() && state.obdDashboardsGlobal.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("No dashboards yet — save a selection") },
+                        onClick = { pickerOpen = false },
+                        enabled = false,
+                    )
+                } else {
+                    if (state.obdDashboardsProfile.isNotEmpty()) {
+                        DropdownMenuItem(
+                            text = {
+                                Text("This profile", color = TextMuted, fontSize = 12.sp)
+                            },
+                            onClick = {},
+                            enabled = false,
+                        )
+                        state.obdDashboardsProfile.forEach { dash ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${dash.name} (${dash.signalCount})")
+                                },
+                                onClick = {
+                                    pickerOpen = false
+                                    onApplyDashboard(dash.id, ObdDashboardScope.PROFILE)
+                                },
+                            )
+                        }
+                    }
+                    if (state.obdDashboardsGlobal.isNotEmpty()) {
+                        DropdownMenuItem(
+                            text = {
+                                Text("Global", color = TextMuted, fontSize = 12.sp)
+                            },
+                            onClick = {},
+                            enabled = false,
+                        )
+                        state.obdDashboardsGlobal.forEach { dash ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${dash.name} (${dash.signalCount})")
+                                },
+                                onClick = {
+                                    pickerOpen = false
+                                    onApplyDashboard(dash.id, ObdDashboardScope.GLOBAL)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Box {
+            IconButton(onClick = { actionsOpen = true }) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = "Dashboard actions",
+                    tint = TextMuted,
+                )
+            }
+            DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Save selection as…") },
+                    onClick = {
+                        actionsOpen = false
+                        nameDraft = ""
+                        saveScope = if (canSaveProfile) {
+                            ObdDashboardScope.PROFILE
+                        } else {
+                            ObdDashboardScope.GLOBAL
+                        }
+                        dialog = ObdDashboardDialog.Save
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Update active") },
+                    enabled = hasActive,
+                    onClick = {
+                        actionsOpen = false
+                        onUpdateActiveDashboard()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Rename active") },
+                    enabled = hasActive,
+                    onClick = {
+                        actionsOpen = false
+                        nameDraft = activeName.orEmpty()
+                        dialog = ObdDashboardDialog.Rename
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy global → profile") },
+                    enabled = canCopyToProfile,
+                    onClick = {
+                        actionsOpen = false
+                        onCopyGlobalDashboardToProfile()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Delete active") },
+                    enabled = hasActive,
+                    onClick = {
+                        actionsOpen = false
+                        onDeleteActiveDashboard()
+                    },
+                )
+                if (favoriteMatchesActive) {
+                    DropdownMenuItem(
+                        text = { Text("Clear favorite") },
+                        onClick = {
+                            actionsOpen = false
+                            onClearFavoriteDashboard()
+                        },
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("Set as favorite") },
+                        enabled = hasActive,
+                        onClick = {
+                            actionsOpen = false
+                            val id = state.obdActiveDashboardId ?: return@DropdownMenuItem
+                            val scope = state.obdActiveDashboardScope ?: return@DropdownMenuItem
+                            onSetFavoriteDashboard(id, scope)
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    when (dialog) {
+        ObdDashboardDialog.None -> Unit
+        ObdDashboardDialog.Save -> {
+            AlertDialog(
+                onDismissRequest = { dialog = ObdDashboardDialog.None },
+                title = { Text("Save dashboard") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = nameDraft,
+                            onValueChange = { nameDraft = it },
+                            label = { Text("Name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text("Scope", color = TextMuted, fontSize = 12.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = saveScope == ObdDashboardScope.PROFILE,
+                                onClick = { saveScope = ObdDashboardScope.PROFILE },
+                                enabled = canSaveProfile,
+                                colors = RadioButtonDefaults.colors(selectedColor = Accent),
+                            )
+                            Text("This profile", color = if (canSaveProfile) TextPrimary else TextMuted)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = saveScope == ObdDashboardScope.GLOBAL,
+                                onClick = { saveScope = ObdDashboardScope.GLOBAL },
+                                colors = RadioButtonDefaults.colors(selectedColor = Accent),
+                            )
+                            Text("Global", color = TextPrimary)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            dialog = ObdDashboardDialog.None
+                            onSaveDashboard(nameDraft, saveScope)
+                        },
+                        enabled = nameDraft.isNotBlank(),
+                    ) { Text("Save") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { dialog = ObdDashboardDialog.None }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
+        ObdDashboardDialog.Rename -> {
+            AlertDialog(
+                onDismissRequest = { dialog = ObdDashboardDialog.None },
+                title = { Text("Rename dashboard") },
+                text = {
+                    OutlinedTextField(
+                        value = nameDraft,
+                        onValueChange = { nameDraft = it },
+                        label = { Text("Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            dialog = ObdDashboardDialog.None
+                            onRenameActiveDashboard(nameDraft)
+                        },
+                        enabled = nameDraft.isNotBlank(),
+                    ) { Text("Rename") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { dialog = ObdDashboardDialog.None }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
+    }
+}
 
 @Composable
 private fun ObdGaugesFullscreen(
@@ -324,9 +662,14 @@ private fun ObdGaugesFullscreen(
                     ) {
                         for (c in 0 until cols) {
                             val index = r * cols + c
+                            val weight = if (index < signals.size) {
+                                expectedGaugeCharBudget(signals[index].unit).toFloat()
+                            } else {
+                                DEFAULT_GAUGE_CHAR_BUDGET.toFloat()
+                            }
                             Box(
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .weight(weight)
                                     .fillMaxHeight()
                                     .padding(3.dp),
                             ) {
@@ -371,6 +714,8 @@ private fun GaugeCell(
     labelSp: Float,
     unitSp: Float,
 ) {
+    val textMeasurer = rememberTextMeasurer()
+    val valueText = formatGaugeValue(row)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -389,15 +734,27 @@ private fun GaugeCell(
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(2.dp))
-        Text(
-            formatGaugeValue(row),
-            color = Accent,
-            fontSize = valueSp.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-        )
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val maxWidthPx = constraints.maxWidth
+            val fittedSp = remember(valueText, valueSp, maxWidthPx) {
+                fitGaugeValueSp(
+                    text = valueText,
+                    baseSp = valueSp,
+                    maxWidthPx = maxWidthPx,
+                    textMeasurer = textMeasurer,
+                )
+            }
+            Text(
+                valueText,
+                color = Accent,
+                fontSize = fittedSp.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         row.unit?.let { unit ->
             Text(
                 unit,
@@ -408,6 +765,29 @@ private fun GaugeCell(
             )
         }
     }
+}
+
+/** Shrink [baseSp] until [text] fits [maxWidthPx] on one line (never ellipsize). */
+private fun fitGaugeValueSp(
+    text: String,
+    baseSp: Float,
+    maxWidthPx: Int,
+    textMeasurer: TextMeasurer,
+    minSp: Float = 12f,
+): Float {
+    if (maxWidthPx <= 0) return baseSp.coerceAtLeast(minSp)
+    var sp = baseSp.coerceAtLeast(minSp)
+    while (sp > minSp) {
+        val width = textMeasurer.measure(
+            text = text,
+            style = TextStyle(fontSize = sp.sp, fontWeight = FontWeight.Bold),
+            maxLines = 1,
+            softWrap = false,
+        ).size.width
+        if (width <= maxWidthPx) break
+        sp -= 1f
+    }
+    return sp
 }
 
 private fun formatGaugeValue(row: ObdSignalRow): String {
